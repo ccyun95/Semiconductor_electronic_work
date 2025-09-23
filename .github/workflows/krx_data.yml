@@ -1,0 +1,49 @@
+name: KRX Daily Data Collector
+
+on:
+  schedule:
+    # 매일 18:10 KST == 09:10 UTC (월~금)
+    - cron: "10 9 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      run_on_holiday:
+        description: "휴장일에도 마지막 영업일 데이터로 실행"
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      RUN_ON_HOLIDAY: ${{ inputs.run_on_holiday || 'true' }}
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Collect / Update KRX data
+        run: |
+          python -m src.update_stock_data --run-on-holiday "${RUN_ON_HOLIDAY}"
+
+      - name: Commit & Push changes (if any)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(data): KRX daily update ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            git push
+          else
+            echo "No changes to commit."
+          fi
