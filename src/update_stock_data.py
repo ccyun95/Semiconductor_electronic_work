@@ -186,7 +186,7 @@ def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd
     df = ensure_all_cols(df)
     for c in [c for c in df.columns if c != "일자"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    df = df.sort_values("일자")
+    df = df.sort_values("일자", ascending=False)
     return df
 
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
@@ -222,7 +222,7 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         base = pd.read_csv(out_path, encoding=ENCODING)
         merged = pd.concat([base, df], ignore_index=True)
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
-        merged = merged.sort_values("일자")
+        merged = merged.sort_values("일자", ascending=False)
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\r\n")
         logging.info("[%s] 업데이트 완료 → %s", eng_name, out_path)
     else:
