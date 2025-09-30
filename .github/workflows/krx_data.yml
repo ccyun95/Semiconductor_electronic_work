@@ -36,6 +36,43 @@ jobs:
         run: |
           python -m src.update_stock_data --run-on-holiday "${RUN_ON_HOLIDAY}"
 
+      - name: Build machine JSON (docs/api/index.json)
+        run: |
+          python - <<'PY'
+          import json, os, glob
+          from pathlib import Path
+          from datetime import datetime, timezone, timedelta
+          import pandas as pd
+          KST = timezone(timedelta(hours=9))
+          data_dir = Path("data")
+          out_path = Path("docs/api/index.json")
+          out_path.parent.mkdir(parents=True, exist_ok=True)
+
+          payload = {
+              "version": 1,
+              "generated_at": datetime.now(tz=KST).strftime("%Y-%m-%dT%H:%M:%S%z"),
+              "timezone": "Asia/Seoul",
+              "items": []
+          }
+
+          for csv_file in sorted(glob.glob(str(data_dir / "*_stock_data.csv"))):
+              name = Path(csv_file).name.replace("_stock_data.csv","")
+              try:
+                  df = pd.read_csv(csv_file, encoding="utf-8-sig")
+              except Exception:
+                  df = pd.read_csv(csv_file)  # fallback
+              item = {
+                  "name": name,
+                  "ticker": "",
+                  "columns": [str(c) for c in df.columns],
+                  "rows": df.astype(str).values.tolist(),
+                  "row_count": int(len(df)),
+              }
+              payload["items"].append(item)
+
+          out_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+          print(f"Wrote {out_path} with {len(payload['items'])} items")
+          PY
       - name: Commit & Push changes (if any)
         run: |
           git config user.name "github-actions[bot]"
