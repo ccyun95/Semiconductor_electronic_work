@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil import tz
@@ -15,6 +16,7 @@ from pykrx import stock
 DATA_DIR = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "data"
 OUTPUT_SUFFIX = "_stock_data.csv"
 ENCODING = "utf-8-sig"     # 엑셀 호환
+DOCS_API_PATH = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "docs" / "api" / "index.json"
 SLEEP_SEC = 0.3            # API 과도 호출 방지
 WINDOW_DAYS_INIT = 370     # 신규 생성시 과거 1년+α
 
@@ -232,6 +234,47 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
 
 
 # ============================================================
+# 자동화용 정적 JSON(단일 파일) 생성
+# ============================================================
+def emit_machine_json_index(companies):
+    """
+    data/<eng_name>_stock_data.csv 들을 하나의 JSON으로 합쳐
+    docs/api/index.json 에 기록합니다.
+    스키마:
+      {
+        "version": 1,
+        "generated_at": "...+0900",
+        "timezone": "Asia/Seoul",
+        "items": [
+          {"name": "...", "ticker": "...", "columns": [...], "rows": [[...], ...], "row_count": N}
+        ]
+      }
+    """
+    payload = {
+        "version": 1,
+        "generated_at": datetime.now(tz=KST).strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "timezone": "Asia/Seoul",
+        "items": []
+    }
+    for name, ticker in companies:
+        csv_path = DATA_DIR / f"{name}{OUTPUT_SUFFIX}"
+        if not csv_path.exists():
+            logging.warning("JSON 빌드에서 제외(파일 없음): %s (%s)", name, ticker)
+            continue
+        df = pd.read_csv(csv_path, encoding=ENCODING)
+        item = {
+            "name": name, "ticker": str(ticker),
+            "columns": [str(c) for c in df.columns],
+            "rows": df.astype(str).values.tolist(),
+            "row_count": int(len(df)),
+        }
+        payload["items"].append(item)
+    DOCS_API_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DOCS_API_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    logging.info("머신 리더블 JSON 생성 → %s", DOCS_API_PATH)
+
+
+# ============================================================
 # 엔트리포인트
 # ============================================================
 def main():
@@ -268,6 +311,9 @@ def main():
         logging.info("변경사항이 있습니다. Git 커밋 단계에서 반영됩니다.")
     else:
         logging.info("변경사항 없음.")
+
+    # 단일 정적 JSON 생성
+    emit_machine_json_index(companies)
 
 
 if __name__ == "__main__":
