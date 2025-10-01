@@ -38,7 +38,7 @@ jobs:
 
       - name: Build per-ticker JSON + manifest (docs/api)
         env:
-          ROWS_LIMIT: "180"   # 필요 시 최근 N행만 포함 (전체 원하면 비우거나 삭제)
+          ROWS_LIMIT: "120"   # 필요 시 최근 N행만 포함 (전체 원하면 비우거나 삭제)
         run: |
           python - <<'PY'
           import json, re, os
