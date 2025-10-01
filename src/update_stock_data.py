@@ -172,7 +172,7 @@ def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd
         sv = pd.DataFrame()
     df3 = rename_short_cols(normalize_date_index(sv), is_balance=False)
 
-    # 4) 공매도 잔고/비중 (예외 안전) ← 문제 발생 지점
+    # 4) 공매도 잔고/비중 (예외 안전)
     try:
         sb = stock.get_shorting_balance_by_date(s, e, ticker)
     except Exception:
@@ -191,8 +191,16 @@ def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd
     df = df.sort_values("일자", ascending=False)
     return df
 
+# ---------- 새 규칙: CSV 파일명에 티커 포함 ----------
+def csv_path_for(eng_name: str, ticker: str) -> Path:
+    """<이름>_<6자리티커>_stock_data.csv"""
+    t = str(ticker).zfill(6)
+    return DATA_DIR / f"{eng_name}_{t}{OUTPUT_SUFFIX}"
+# -----------------------------------------------------
+
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
-    out_path = DATA_DIR / f"{eng_name}{OUTPUT_SUFFIX}"
+    # 새 파일명 규칙 적용
+    out_path = csv_path_for(eng_name, ticker)
 
     today = kst_today_date()
     end_date = last_trading_day_by_ohlcv(ticker, today)
@@ -225,9 +233,11 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         merged = pd.concat([base, df], ignore_index=True)
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
         merged = merged.sort_values("일자", ascending=False)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\r\n")
         logging.info("[%s] 업데이트 완료 → %s", eng_name, out_path)
     else:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\r\n")
         logging.info("[%s] 신규 생성 완료 → %s", eng_name, out_path)
     return True
@@ -238,7 +248,7 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
 # ============================================================
 def emit_machine_json_index(companies):
     """
-    data/<eng_name>_stock_data.csv 들을 하나의 JSON으로 합쳐
+    data/<eng_name>_<ticker>_stock_data.csv 들을 하나의 JSON으로 합쳐
     docs/api/index.json 에 기록합니다.
     스키마:
       {
@@ -257,13 +267,13 @@ def emit_machine_json_index(companies):
         "items": []
     }
     for name, ticker in companies:
-        csv_path = DATA_DIR / f"{name}{OUTPUT_SUFFIX}"
+        csv_path = csv_path_for(name, ticker)   # ← 새 규칙 경로 사용
         if not csv_path.exists():
             logging.warning("JSON 빌드에서 제외(파일 없음): %s (%s)", name, ticker)
             continue
         df = pd.read_csv(csv_path, encoding=ENCODING)
         item = {
-            "name": name, "ticker": str(ticker),
+            "name": name, "ticker": str(ticker).zfill(6),
             "columns": [str(c) for c in df.columns],
             "rows": df.astype(str).values.tolist(),
             "row_count": int(len(df)),
