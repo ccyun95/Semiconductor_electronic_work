@@ -107,6 +107,24 @@ jobs:
           print(f"[OK] wrote {count} per-ticker JSON files and manifest: {api_dir/'index.json'} (items={len(manifest['items'])})")
           PY
 
+      # ↓↓↓ 여기에 '줄바꿈만' 적용하는 스텝 하나 추가 ↓↓↓
+      - name: Pretty-print only ticker JSONs (no other changes)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update >/dev/null 2>&1 || true
+          sudo apt-get install -y jq >/dev/null 2>&1 || true
+
+          shopt -s nullglob
+          # index.json은 건드리지 않고, 티커별 JSON만 줄바꿈(indent=2) 적용
+          for f in docs/api/*.json; do
+            [ "$(basename "$f")" = "index.json" ] && continue
+            tmp="${f}.tmp"
+            # 줄바꿈만 적용(내용/키 순서/행수 변경 없음)
+            jq '.' "$f" > "$tmp" && mv "$tmp" "$f"
+          done
+      
       - name: Commit & Push changes (if any)
         run: |
           set -e
