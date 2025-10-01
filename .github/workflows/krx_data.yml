@@ -39,14 +39,18 @@ jobs:
       - name: Build machine JSON (docs/api/index.json)
         run: |
           python - <<'PY'
-          import json, os, glob
+          import json, glob, re
           from pathlib import Path
           from datetime import datetime, timezone, timedelta
           import pandas as pd
+
           KST = timezone(timedelta(hours=9))
           data_dir = Path("data")
           out_path = Path("docs/api/index.json")
           out_path.parent.mkdir(parents=True, exist_ok=True)
+
+          # 새 규칙: <name>_<6digits>_stock_data.csv
+          pat = re.compile(r"^(?P<name>.+?)_(?P<ticker>\d{6})_stock_data\.csv$")
 
           payload = {
               "version": 1,
@@ -55,15 +59,22 @@ jobs:
               "items": []
           }
 
-          for csv_file in sorted(glob.glob(str(data_dir / "*_stock_data.csv"))):
-              name = Path(csv_file).name.replace("_stock_data.csv","")
+          for path in sorted(data_dir.glob("*_stock_data.csv")):
+              m = pat.match(path.name)
+              if not m:
+                  # 구규칙 파일(<name>_stock_data.csv)은 스킵(원하면 별도 매핑 추가 가능)
+                  continue
+              name = m.group("name")
+              ticker = m.group("ticker")
+
               try:
-                  df = pd.read_csv(csv_file, encoding="utf-8-sig")
+                  df = pd.read_csv(path, encoding="utf-8-sig")
               except Exception:
-                  df = pd.read_csv(csv_file)  # fallback
+                  df = pd.read_csv(path)  # fallback
+
               item = {
                   "name": name,
-                  "ticker": "",
+                  "ticker": ticker,
                   "columns": [str(c) for c in df.columns],
                   "rows": df.astype(str).values.tolist(),
                   "row_count": int(len(df)),
@@ -73,6 +84,7 @@ jobs:
           out_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
           print(f"Wrote {out_path} with {len(payload['items'])} items")
           PY
+
       - name: Commit & Push changes (if any)
         run: |
           git config user.name "github-actions[bot]"
