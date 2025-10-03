@@ -234,11 +234,11 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
         merged = merged.sort_values("일자", ascending=False)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\r\n")
+        merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 업데이트 완료 → %s", eng_name, out_path)
     else:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\r\n")
+        df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 신규 생성 완료 → %s", eng_name, out_path)
     return True
 
