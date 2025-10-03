@@ -46,29 +46,24 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 1) CSV 생성/업데이트 (원본 로직 유지)
-      - name: Update CSVs from company_list.txt
+      # 1) CSV 생성/업데이트 (경로 고정: src/update_stock_data.py, data/company_list.txt)
+      - name: Update CSVs from data/company_list.txt
         env:
           PYTHONUNBUFFERED: "1"
         run: |
+          set -e
           mkdir -p data
-          # workflow_dispatch 입력값 반영 (없으면 default true)
+          if [ ! -f data/company_list.txt ]; then
+            echo "company_list.txt not found at data/company_list.txt"; exit 1
+          fi
+
           RUN_ON_HOLIDAY="${{ github.event.inputs.run_on_holiday }}"
           if [ -z "$RUN_ON_HOLIDAY" ]; then RUN_ON_HOLIDAY="true"; fi
 
-          if [ -f data/company_list.txt ]; then
-            python update_stock_data.py \
-              --company-list data/company_list.txt \
-              --run-on-holiday "$RUN_ON_HOLIDAY" \
-              --rows-limit "${ROWS_LIMIT}"
-          elif [ -f company_list.txt ]; then
-            python update_stock_data.py \
-              --company-list company_list.txt \
-              --run-on-holiday "$RUN_ON_HOLIDAY" \
-              --rows-limit "${ROWS_LIMIT}"
-          else
-            echo "company_list.txt not found"; exit 1
-          fi
+          python src/update_stock_data.py \
+            --company-list data/company_list.txt \
+            --run-on-holiday "$RUN_ON_HOLIDAY" \
+            --rows-limit "${ROWS_LIMIT}"
 
       # (선택) CSV 줄바꿈 LF 표준화
       - name: Normalize CSV line endings to LF
