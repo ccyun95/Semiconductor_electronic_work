@@ -224,7 +224,8 @@ def emit_per_ticker_json(companies, rows_limit=None):
             "row_count": int(len(df)),
         }
         out = api_dir / f"{name}_{str(ticker).zfill(6)}.json"
-        out.write_text(json.dumps(item, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        # ★ 변경점: 줄바꿈/들여쓰기(Pretty-print) 적용
+        out.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         cnt += 1
     logging.info("기업별 JSON 생성: %d개", cnt)
 
