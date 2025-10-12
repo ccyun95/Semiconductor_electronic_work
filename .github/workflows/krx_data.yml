@@ -99,27 +99,3 @@ jobs:
             git commit -m "chore(pages): per-ticker JSON + index.html tables [skip ci]"
             git push
           fi
-
-# --- Appended by ChatGPT: Gist auto-update step ---
-
-      - name: Update Gist with per-ticker JSONs
-        if: always()
-        env:
-          GIST_ID: ${{ secrets.GIST_ID }}
-          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
-        shell: bash
-        run: |
-          set -e
-          tmp=$(mktemp)
-          echo '{ "files": { ' > "$tmp"
-          first=1
-          for f in docs/api/*.json; do
-            [ $first -eq 0 ] && echo ',' >> "$tmp"
-            first=0
-            name=$(basename "$f")
-            printf '"%s": { "content": %s }' "$name" "$(jq -Rs . < "$f")" >> "$tmp"
-          done
-          echo ' } }' >> "$tmp"
-          curl -s -X PATCH             -H "Authorization: token $GH_TOKEN"             -H "Content-Type: application/json"             -d @"$tmp"             "https://api.github.com/gists/$GIST_ID" >/dev/null
-          echo "Updated Gist: https://gist.github.com/${GIST_ID}"
-
