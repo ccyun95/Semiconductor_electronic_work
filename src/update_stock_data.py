@@ -159,6 +159,37 @@ def fetch_block(ticker: str, start_d, end_d) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df.sort_values("일자", ascending=False)
 
+# =========================
+# (신규) 공매도 잔고/비중 '2거래일 전 값' 반영 함수
+# =========================
+def apply_short_balance_lag(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    최신 정렬(내림차순) 기준으로,
+    0행(현거래일), 1행(1거래일 전)의 '공매도잔고/공매도잔고비중'을
+    2행(2거래일 전)의 값으로 덮어씁니다.
+    - 2거래일 전 데이터가 없으면(행<3) 변경하지 않음.
+    """
+    cols = ["공매도잔고", "공매도잔고비중"]
+    if not all(c in df.columns for c in cols):
+        return df
+    if df.empty:
+        return df
+
+    df = df.copy()
+    # '일자' 기준 내림차순 보장
+    try:
+        df["__dt__"] = pd.to_datetime(df["일자"], errors="coerce")
+        df.sort_values("__dt__", ascending=False, inplace=True)
+        df.drop(columns="__dt__", inplace=True)
+    except Exception:
+        df.sort_values("일자", ascending=False, inplace=True)
+
+    if len(df) >= 3:
+        ref = df.iloc[2][cols].values  # 2거래일 전
+        df.iloc[0, df.columns.get_indexer(cols)] = ref
+        df.iloc[1, df.columns.get_indexer(cols)] = ref
+    return df
+
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
     out_path = csv_path_for(eng_name, ticker)
     today = kst_today_date()
@@ -188,15 +219,21 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         merged = pd.concat([base, df], ignore_index=True)
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
         merged.sort_values("일자", ascending=False, inplace=True)
+
+        # === 여기서 최신/전일의 공매도잔고/비중을 2거래일 전 값으로 치환 ===
+        merged = apply_short_balance_lag(merged)
+
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 업데이트 → %s", eng_name, out_path)
     else:
+        # 신규 파일 생성 직전에도 동일 규칙 적용
+        df = apply_short_balance_lag(df)
         df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 신규 생성 → %s", eng_name, out_path)
     return True
 
 # =========================
-# (변경) 기업별 JSON + index.html 생성
+# 기업별 JSON + index.html 생성
 #  - 단일 index.json 생성 없음
 # =========================
 def emit_per_ticker_json(companies, rows_limit=None):
@@ -224,8 +261,7 @@ def emit_per_ticker_json(companies, rows_limit=None):
             "row_count": int(len(df)),
         }
         out = api_dir / f"{name}_{str(ticker).zfill(6)}.json"
-        # ★ 변경점: 줄바꿈/들여쓰기(Pretty-print) 적용
-        out.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        out.write_text(json.dumps(item, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         cnt += 1
     logging.info("기업별 JSON 생성: %d개", cnt)
 
@@ -360,7 +396,7 @@ def main():
     else:
         logging.info("변경사항 없음.")
 
-    # (변경) 단일 index.json은 만들지 않음 → 기업별 JSON + index.html만 생성
+    # 단일 index.json은 만들지 않음 → 기업별 JSON + index.html만 생성
     emit_per_ticker_json(companies, rows_limit=rows_limit)
     emit_index_html(companies, rows_limit=rows_limit)
 
