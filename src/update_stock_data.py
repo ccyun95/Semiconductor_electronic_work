@@ -17,6 +17,7 @@ OUTPUT_SUFFIX = "_stock_data.csv"
 ENCODING = "utf-8-sig"     # 엑셀 호환
 SLEEP_SEC = 0.3            # API 과호출 방지
 WINDOW_DAYS_INIT = 370     # 신규 생성 시 과거 1년+α
+BACKFILL_CAL_DAYS_FOR_SHORT = 10  # 공매도잔고/비중 지연 공개 보정용 최소 재수집 구간(캘린더 일수)
 
 REQ_COLS = [
     "일자","시가","고가","저가","종가","거래량","등락률",
@@ -160,23 +161,20 @@ def fetch_block(ticker: str, start_d, end_d) -> pd.DataFrame:
     return df.sort_values("일자", ascending=False)
 
 # =========================
-# (신규) 공매도 잔고/비중 '2거래일 전 값' 반영 함수
+# (신규) 공매도 잔고/비중: T·T-1을 T-2 값으로 덮어쓰기
 # =========================
-def apply_short_balance_lag(df: pd.DataFrame) -> pd.DataFrame:
+def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
     """
-    최신 정렬(내림차순) 기준으로,
-    0행(현거래일), 1행(1거래일 전)의 '공매도잔고/공매도잔고비중'을
-    2행(2거래일 전)의 값으로 덮어씁니다.
+    최신 내림차순 정렬 기준으로,
+    - 2행(2거래일 전)의 '공매도잔고/공매도잔고비중' 값을 읽어,
+    - 0행(현거래일), 1행(전일)의 두 컬럼을 동일 값으로 덮어쓴다.
     - 2거래일 전 데이터가 없으면(행<3) 변경하지 않음.
     """
     cols = ["공매도잔고", "공매도잔고비중"]
-    if not all(c in df.columns for c in cols):
+    if df is None or df.empty or not all(c in df.columns for c in cols):
         return df
-    if df.empty:
-        return df
-
     df = df.copy()
-    # '일자' 기준 내림차순 보장
+    # 최신 우선 정렬 보장
     try:
         df["__dt__"] = pd.to_datetime(df["일자"], errors="coerce")
         df.sort_values("__dt__", ascending=False, inplace=True)
@@ -185,9 +183,9 @@ def apply_short_balance_lag(df: pd.DataFrame) -> pd.DataFrame:
         df.sort_values("일자", ascending=False, inplace=True)
 
     if len(df) >= 3:
-        ref = df.iloc[2][cols].values  # 2거래일 전
-        df.iloc[0, df.columns.get_indexer(cols)] = ref
-        df.iloc[1, df.columns.get_indexer(cols)] = ref
+        ref = df.iloc[2][cols].values  # 2거래일 전 값
+        for idx in [0, 1]:
+            df.iloc[idx, df.columns.get_indexer(cols)] = ref
     return df
 
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
@@ -195,10 +193,13 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
     today = kst_today_date()
     end_date = last_trading_day_by_ohlcv(ticker, today)
 
+    # ---- 백필 윈도우 적용: 최소 최근 N일은 항상 다시 수집 (T-2 공개분 반영용) ----
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
         last_have = None if base.empty else pd.to_datetime(base["일자"], errors="coerce").dt.date.max()
-        start_date = (last_have + timedelta(days=1)) if last_have else (end_date - timedelta(days=WINDOW_DAYS_INIT))
+        start_date_base = (last_have + timedelta(days=1)) if last_have else (end_date - timedelta(days=WINDOW_DAYS_INIT))
+        backfill_floor = end_date - timedelta(days=BACKFILL_CAL_DAYS_FOR_SHORT)
+        start_date = min(start_date_base, backfill_floor)
     else:
         start_date = end_date - timedelta(days=WINDOW_DAYS_INIT)
 
@@ -218,16 +219,14 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         base = pd.read_csv(out_path, encoding=ENCODING)
         merged = pd.concat([base, df], ignore_index=True)
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
+        # === 여기서 T·T-1의 잔고/비중을 T-2 값으로 덮어쓰기 ===
+        merged = propagate_short_balance_from_t2(merged)
+        merged.sort_values("일자", descending := False)  # keep stable order in output later (we'll set to descending=True)
         merged.sort_values("일자", ascending=False, inplace=True)
-
-        # === 여기서 최신/전일의 공매도잔고/비중을 2거래일 전 값으로 치환 ===
-        merged = apply_short_balance_lag(merged)
-
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 업데이트 → %s", eng_name, out_path)
     else:
-        # 신규 파일 생성 직전에도 동일 규칙 적용
-        df = apply_short_balance_lag(df)
+        df = propagate_short_balance_from_t2(df)
         df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
         logging.info("[%s] 신규 생성 → %s", eng_name, out_path)
     return True
