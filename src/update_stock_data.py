@@ -89,6 +89,14 @@ def normalize_date_index(df: pd.DataFrame) -> pd.DataFrame:
     df["일자"] = pd.to_datetime(df["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
     return df
 
+def _normalize_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    """CSV/수집 데이터 모두 '일자'를 YYYY-MM-DD 문자열로 표준화."""
+    if df is None or df.empty or "일자" not in df.columns:
+        return df
+    df = df.copy()
+    df["일자"] = pd.to_datetime(df["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return df
+
 def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "일자" not in df.columns:
         return empty_with_cols(["일자","기관 합계","기타법인","개인","외국인 합계","전체"])
@@ -109,8 +117,8 @@ def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
         return empty_with_cols(["일자"] + base)
     dfc = df.copy()
     if is_balance:
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고","잔고","BAL_QTY"])), None)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고비중","잔고비중","BAL_RTO"])), None)
+        amt = next((c for c in dfc.columns if any(k in c for c2 in ["공매도잔고","잔고","BAL_QTY"] for k in [c2])), None)
+        rto = next((c for c in dfc.columns if any(k in c for c2 in ["공매도잔고비중","잔고비중","BAL_RTO"] for k in [c2])), None)
         dfc["공매도잔고"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
         dfc["공매도잔고비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
         keep = ["일자","공매도잔고","공매도잔고비중"]
@@ -161,7 +169,7 @@ def fetch_block(ticker: str, start_d, end_d) -> pd.DataFrame:
     return df.sort_values("일자", ascending=False)
 
 # =========================
-# (신규) 공매도 잔고/비중: T·T-1을 T-2 값으로 덮어쓰기
+# (신규) T·T-1의 공매도잔고/비중을 T-2 값으로 덮어쓰기
 # =========================
 def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -188,17 +196,26 @@ def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
             df.iloc[idx, df.columns.get_indexer(cols)] = ref
     return df
 
+# =========================
+# 회사별 업데이트
+# =========================
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
     out_path = csv_path_for(eng_name, ticker)
     today = kst_today_date()
     end_date = last_trading_day_by_ohlcv(ticker, today)
 
-    # ---- 백필 윈도우 적용: 최소 최근 N일은 항상 다시 수집 (T-2 공개분 반영용) ----
+    # ---- 백필 윈도우 적용: 최근 N일 + last_have - 2일까지 후퇴 ----
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
+        base = _normalize_date_col(base)
         last_have = None if base.empty else pd.to_datetime(base["일자"], errors="coerce").dt.date.max()
+
         start_date_base = (last_have + timedelta(days=1)) if last_have else (end_date - timedelta(days=WINDOW_DAYS_INIT))
         backfill_floor = end_date - timedelta(days=BACKFILL_CAL_DAYS_FOR_SHORT)
+        if last_have:
+            conservative_floor = last_have - timedelta(days=2)
+            backfill_floor = min(backfill_floor, conservative_floor)
+
         start_date = min(start_date_base, backfill_floor)
     else:
         start_date = end_date - timedelta(days=WINDOW_DAYS_INIT)
@@ -211,24 +228,42 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
         logging.info("[%s] 최신 상태 (추가 데이터 없음)", eng_name)
         return False
 
-    logging.info("[%s] 수집: %s ~ %s (티커 %s)", eng_name, start_date, end_date, ticker)
+    logging.info("[%s] 재수집 구간: %s ~ %s (티커 %s)", eng_name, start_date, end_date, ticker)
     df = fetch_block(ticker, start_date, end_date)
+    df = _normalize_date_col(df)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
+        base = _normalize_date_col(base)
+
+        # 병합: base(우선순위 낮음) + df(우선순위 높음)
+        base["__pri__"] = 0
+        df["__pri__"] = 1
         merged = pd.concat([base, df], ignore_index=True)
-        merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
-        # === 여기서 T·T-1의 잔고/비중을 T-2 값으로 덮어쓰기 ===
+
+        # 최신→과거, 같은 일자는 __pri__가 높은(df) 값이 먼저 오도록
+        merged["__dt__"] = pd.to_datetime(merged["일자"], errors="coerce")
+        merged.sort_values(["__dt__", "__pri__"], ascending=[False, False], inplace=True, kind="mergesort")
+
+        # 동일 '일자' 중복 제거: 첫 행(=가장 최신 & df 우선)이 남게
+        merged.drop_duplicates(subset=["일자"], keep="first", inplace=True)
+        merged.drop(columns=["__dt__", "__pri__"], inplace=True)
+        merged.reset_index(drop=True, inplace=True)
+
+        # T·T-1 ← T-2 값 덮어쓰기
         merged = propagate_short_balance_from_t2(merged)
-        merged.sort_values("일자", descending := False)  # keep stable order in output later (we'll set to descending=True)
-        merged.sort_values("일자", ascending=False, inplace=True)
+
+        # 최종 정렬 및 저장
+        merged["__dt__"] = pd.to_datetime(merged["일자"], errors="coerce")
+        merged.sort_values("__dt__", ascending=False, inplace=True)
+        merged.drop(columns="__dt__", inplace=True)
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
-        logging.info("[%s] 업데이트 → %s", eng_name, out_path)
+        logging.info("[%s] 업데이트 → %s (총 %d행)", eng_name, out_path, len(merged))
     else:
         df = propagate_short_balance_from_t2(df)
         df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
-        logging.info("[%s] 신규 생성 → %s", eng_name, out_path)
+        logging.info("[%s] 신규 생성 → %s (총 %d행)", eng_name, out_path, len(df))
     return True
 
 # =========================
