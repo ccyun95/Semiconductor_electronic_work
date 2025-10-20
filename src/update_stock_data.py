@@ -97,6 +97,27 @@ def _normalize_date_col(df: pd.DataFrame) -> pd.DataFrame:
     df["일자"] = pd.to_datetime(df["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
     return df
 
+def _to_float_clean(s):
+    """문자 형태 수치를 안전하게 float로 변환: 쉼표/공백/% 제거"""
+    try:
+        if pd.isna(s):
+            return 0.0
+        x = str(s).strip()
+        if x.endswith("%"):
+            x = x[:-1]
+        x = x.replace(",", "").replace(" ", "")
+        return float(x)
+    except Exception:
+        return 0.0
+
+def _pick_first_col(cols, candidates):
+    """cols에서 candidates(우선순위 리스트) 중 처음으로 매칭되는 컬럼명 반환"""
+    for key in candidates:
+        for c in cols:
+            if key in c:
+                return c
+    return None
+
 def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "일자" not in df.columns:
         return empty_with_cols(["일자","기관 합계","기타법인","개인","외국인 합계","전체"])
@@ -112,23 +133,55 @@ def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df[["일자","기관 합계","기타법인","개인","외국인 합계","전체"]]
 
 def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
+    """
+    공매도 관련 표준화.
+    - is_balance=False: 거래(볼륨) → ['공매도','공매도비중']
+    - is_balance=True : 잔고     → ['공매도잔고','공매도잔고비중']
+    ※ 퍼센트/쉼표 등 문자열 전처리 포함
+    """
     if df is None or df.empty or "일자" not in df.columns:
         base = ["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]
         return empty_with_cols(["일자"] + base)
+
     dfc = df.copy()
+
     if is_balance:
-        amt = next((c for c in dfc.columns if any(k in c for c2 in ["공매도잔고","잔고","BAL_QTY"] for k in [c2])), None)
-        rto = next((c for c in dfc.columns if any(k in c for c2 in ["공매도잔고비중","잔고비중","BAL_RTO"] for k in [c2])), None)
-        dfc["공매도잔고"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도잔고비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        # pykrx 잔고 계열에서 흔한 컬럼들: '공매도잔고수량/금액', '잔고수량/금액', '공매도잔고비중'('잔고비중')
+        amt_col = _pick_first_col(
+            dfc.columns,
+            ["공매도잔고", "잔고수량", "잔고금액", "잔고", "BAL_QTY", "BAL_AMT"]
+        )
+        rto_col = _pick_first_col(
+            dfc.columns,
+            ["공매도잔고비중", "잔고비중", "BAL_RTO", "비중"]  # '비중'이 여러 개일 수 있어도 우선순위상 뒤로 둠
+        )
+
+        dfc["공매도잔고"] = dfc[amt_col].apply(_to_float_clean) if amt_col else 0.0
+        dfc["공매도잔고비중"] = dfc[rto_col].apply(_to_float_clean) if rto_col else 0.0
+
         keep = ["일자","공매도잔고","공매도잔고비중"]
+        out = dfc[keep].copy()
+
     else:
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도","공매도거래량","거래량"])), None)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도비중","비중"])), None)
-        dfc["공매도"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        # 거래(볼륨) 계열: '공매도거래량/대금', '공매도비중'
+        amt_col = _pick_first_col(
+            dfc.columns,
+            ["공매도거래량", "공매도", "거래량", "SV_QTY", "SV_AMT"]
+        )
+        rto_col = _pick_first_col(
+            dfc.columns,
+            ["공매도비중", "비중", "SV_RTO"]
+        )
+
+        dfc["공매도"] = dfc[amt_col].apply(_to_float_clean) if amt_col else 0.0
+        dfc["공매도비중"] = dfc[rto_col].apply(_to_float_clean) if rto_col else 0.0
+
         keep = ["일자","공매도","공매도비중"]
-    return dfc[keep]
+        out = dfc[keep].copy()
+
+    # 날짜 표준화
+    out["일자"] = pd.to_datetime(out["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return out
 
 def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQ_COLS:
@@ -163,13 +216,16 @@ def fetch_block(ticker: str, start_d, end_d) -> pd.DataFrame:
     df = df1.merge(df2, on="일자", how="left") \
             .merge(df3, on="일자", how="left") \
             .merge(df4, on="일자", how="left")
+
+    # 숫자 변환(퍼센트/쉼표 정규화는 각 rename_*에서 처리 완료)
     df = ensure_all_cols(df)
     for c in [c for c in df.columns if c != "일자"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
     return df.sort_values("일자", ascending=False)
 
 # =========================
-# (신규) T·T-1의 공매도잔고/비중을 T-2 값으로 덮어쓰기
+# (유지) T·T-1의 공매도잔고/비중을 T-2 값으로 덮어쓰기
 # =========================
 def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -182,7 +238,6 @@ def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or not all(c in df.columns for c in cols):
         return df
     df = df.copy()
-    # 최신 우선 정렬 보장
     try:
         df["__dt__"] = pd.to_datetime(df["일자"], errors="coerce")
         df.sort_values("__dt__", ascending=False, inplace=True)
@@ -191,7 +246,7 @@ def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
         df.sort_values("일자", ascending=False, inplace=True)
 
     if len(df) >= 3:
-        ref = df.iloc[2][cols].values  # 2거래일 전 값
+        ref = df.iloc[2][cols].values
         for idx in [0, 1]:
             df.iloc[idx, df.columns.get_indexer(cols)] = ref
     return df
