@@ -124,45 +124,6 @@ def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     keep = ["일자","기관 합계","기타법인","개인","외국인 합계","전체"]
     return df[keep]
 
-def clean_num_series(s: pd.Series) -> pd.Series:
-    """문자열 내 콤마/공백/% 제거 후 숫자로 변환"""
-    if s is None:
-        return pd.Series(dtype="float64")
-    if not isinstance(s, pd.Series):
-        s = pd.Series(s)
-    return (
-        s.astype(str)
-         .str.replace(",", "", regex=False)
-         .str.replace("%", "", regex=False)
-         .str.replace(" ", "", regex=False)
-         .replace({"": None, "nan": None})
-         .pipe(pd.to_numeric, errors="coerce")
-    )
-
-def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
-    if df is None or df.empty or "일자" not in df.columns:
-        return empty_with_cols(["일자"] + (["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]))
-    dfc = df.copy()
-    # 후보 키 폭넓게 탐색
-    def pick(colnames, keywords):
-        for c in colnames:
-            if any(k in c for k in keywords):
-                return c
-        return None
-
-    if is_balance:
-        amt_col = pick(dfc.columns, ["공매도잔고", "잔고", "BAL_QTY"])
-        rto_col = pick(dfc.columns, ["공매도잔고비중", "잔고비중", "BAL_RTO", "비중", "비율"])
-        dfc["공매도잔고"]     = clean_num_series(dfc[amt_col]) if amt_col else 0
-        dfc["공매도잔고비중"] = clean_num_series(dfc[rto_col]) if rto_col else 0.0
-        return dfc[["일자","공매도잔고","공매도잔고비중"]]
-    else:
-        amt_col = pick(dfc.columns, ["공매도", "공매도거래량", "거래량"])
-        rto_col = pick(dfc.columns, ["공매도비중", "비중"])
-        dfc["공매도"]   = clean_num_series(dfc[amt_col]) if amt_col else 0
-        dfc["공매도비중"] = clean_num_series(dfc[rto_col]) if rto_col else 0.0
-        return dfc[["일자","공매도","공매도비중"]]
-
 def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQ_COLS:
         if col not in df.columns:
@@ -175,11 +136,12 @@ def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd
     inv   = stock.get_market_trading_volume_by_date(s, e, ticker); df2 = rename_investor_cols(normalize_date_index(inv))
     try: sv = stock.get_shorting_volume_by_date(s, e, ticker)
     except Exception: sv = pd.DataFrame()
-    df3 = rename_short_cols(normalize_date_index(sv), is_balance=False)
+    df3 = normalize_date_index(sv)
     try: sb = stock.get_shorting_balance_by_date(s, e, ticker)
     except Exception: sb = pd.DataFrame()
-    df4 = rename_short_cols(normalize_date_index(sb), is_balance=True)
+    df4 = normalize_date_index(sb)
 
+    # 열 이름은 수집단계에서 손대지 않음(원 CSV를 그대로 쓰기 위함)
     df = df1.merge(df2, on="일자", how="left").merge(df3, on="일자", how="left").merge(df4, on="일자", how="left")
     df = ensure_all_cols(df)
     for c in [c for c in df.columns if c != "일자"]:
@@ -235,17 +197,27 @@ def emit_per_ticker_json(companies, rows_limit=None):
         csv_path = csv_path_for(name, ticker)
         if not csv_path.exists():
             continue
-        try: df = pd.read_csv(csv_path, encoding=ENCODING)
-        except Exception: df = pd.read_csv(csv_path)
-        if df.empty: continue
+        try:
+            df = pd.read_csv(csv_path, encoding=ENCODING)
+        except Exception:
+            df = pd.read_csv(csv_path)
+        if df.empty:
+            continue
+
+        # ✅ CSV 열 이름을 그대로 사용하되, 공백/숨은문자 제거
+        df.columns = [str(c).strip() for c in df.columns]
+
         df_use = df.head(int(rows_limit)) if rows_limit else df
         payload = {
-            "name": name, "ticker": str(ticker).zfill(6),
-            "columns": list(df_use.columns),
+            "name": name,
+            "ticker": str(ticker).zfill(6),
+            "columns": list(df_use.columns),  # ← trim 적용된 이름
             "rows": df_use.astype(object).where(pd.notna(df_use), "").values.tolist(),
             "generated_at": kst_now().strftime("%Y-%m-%d %H:%M:%S %Z")
         }
-        (API_DIR / f"{name}_{str(ticker).zfill(6)}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        (API_DIR / f"{name}_{str(ticker).zfill(6)}.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
         cnt += 1
     logging.info("per-ticker JSON 생성 완료: %d files → %s", cnt, API_DIR)
 
@@ -271,6 +243,9 @@ def emit_index_html(companies, rows_limit=None):
         if rows_limit:
             df = df.head(int(rows_limit))
 
+        # ✅ 컬럼명 trim (CSV→HTML 섹션)
+        df.columns = [str(c).strip() for c in df.columns]
+
         columns = [str(c) for c in df.columns]
         rows = df.astype(object).where(pd.notna(df), "").astype(str).values.tolist()
 
@@ -283,7 +258,7 @@ def emit_index_html(companies, rows_limit=None):
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
-            "columns": columns,
+            "columns": columns,  # ← trim 적용된 이름
             "rows": rows,
         }
         json_raw = json.dumps(payload, ensure_ascii=False)
@@ -301,7 +276,7 @@ def emit_index_html(companies, rows_limit=None):
       <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-{_html.escape(sec_id)}"></div>
       <div class="chart" id="chart-flow-{_html.escape(sec_id)}"></div>
     </div>
@@ -317,7 +292,6 @@ def emit_index_html(companies, rows_limit=None):
 
     nav = "".join(f'<a href="#{_id_from(s)}">{_id_from(s)}</a>' for s in sections)
 
-    # f-string 대신 Template 사용(중괄호 충돌 방지)
     html_template = Template("""<!doctype html>
 <html lang="ko">
 <head>
@@ -398,7 +372,9 @@ function renderOne(secId){
   if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
   let j=null; try{ j=JSON.parse(tag.textContent); }catch(e){ showError(secId,'섹션 데이터 파싱 실패: '+e); return; }
 
-  const cols=j.columns||[];
+  // ✅ CSV→JSON에서 이미 trim했지만, JS에서도 한 번 더 안전 처리
+  const cols = (j.columns || []).map(c => String(c).trim());
+
   const iDate=idxOf(cols,'일자',['\\ufeff일자','DATE','date']),
         iOpen=idxOf(cols,'시가',['Open','open']),
         iHigh=idxOf(cols,'고가',['High','high']),
@@ -408,7 +384,10 @@ function renderOne(secId){
         iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
         iInst=idxOf(cols,'기관 합계',['기관합계']),
         iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
-        iShortBR=idxOf(cols,'공매도잔고비중',['공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)','잔고비중','잔고 비중','공매도잔고비율','잔고비율']);
+        iShortBR=idxOf(cols,'공매도잔고비중',[
+          '공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)',
+          '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
+        ]);
 
   if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락(일자/시가/고가/저가/종가)'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
@@ -424,17 +403,21 @@ function renderOne(secId){
   let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
   let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
+  // 지표 계산 전에 오름차순(과거→현재)으로 정렬
   [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
     toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
 
+  // 이동평균/보조지표
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
+  // 기관/외국인 누적
   const instCum    = cumsum(inst);
   const foreignCum = cumsum(foreign);
 
+  // -------- 차트 1 --------
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
     xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
@@ -471,10 +454,11 @@ function renderOne(secId){
 
   Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
+  // -------- 차트 2 --------
   const layout2={
     yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
     yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
-           range:[0, Math.max(1, safeMax(shortBR.concat(shortR))*1.2)]},
+           range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
     margin:{t:40,l:60,r:50,b:30},
     hovermode:'x unified',
     legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
