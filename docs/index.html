@@ -9,39 +9,32 @@
 <title>KRX 기업별 데이터 테이블</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", Roboto, Arial, sans-serif; margin: 24px; background-color: #f9fafb; }
-  header { margin-bottom: 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 16px; }
-  h1 { margin: 0 0 8px 0; font-size: 24px; color: #111827; }
-  .meta-top { color:#6b7280; font-size:14px; }
-  .nav { display:flex; flex-wrap:wrap; gap:8px 12px; margin-top:12px; }
-  .nav a { font-size:14px; text-decoration:none; color:#2563eb; background: #eff6ff; padding: 4px 8px; border-radius: 4px; }
-  .nav a:hover { background: #dbeafe; }
-  
-  section { margin: 40px 0; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-  h2 { font-size: 20px; margin: 0 0 16px 0; border-left: 4px solid #2563eb; padding-left: 12px; color: #1f2937; }
-  
-  .grid { display: flex; flex-direction: column; gap: 20px; }
-  
-  /* 표 스타일 개선 */
-  .scroll { overflow:auto; max-height: 400px; border:1px solid #e5e7eb; border-radius: 6px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
-  th, td { border-bottom: 1px solid #e5e7eb; padding: 8px 12px; text-align: right; }
-  th { position: sticky; top:0; background:#f3f4f6; color: #374151; font-weight: 600; border-bottom: 2px solid #e5e7eb; }
-  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: inherit; border-right: 1px solid #e5e7eb; }
-  tr:hover td { background-color: #f9fafb; }
-  
-  .meta { color:#9ca3af; font-size:12px; margin-top: 8px; text-align: right; }
-  
-  /* 차트 레이아웃 개선: 1단 배열로 변경하여 가로폭 확보 */
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+  header { margin-bottom: 20px; }
+  .meta-top { color:#666; font-size:14px; }
+  .nav { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }
+  .nav a { font-size:13px; text-decoration:none; color:#2563eb; }
+  section { margin: 32px 0; }
+  h2 { font-size: 18px; margin: 12px 0; }
+  .grid { display: flex; flex-direction: column; gap: 12px; }
+  .scroll { overflow:auto; max-height: 50vh; border:1px solid #e5e7eb; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; white-space: nowrap; }
+  thead th { position: sticky; top:0; background:#fafafa; }
+  .meta { color:#666; font-size:12px; }
   .charts { width: 100%; }
-  .chart-row { display: grid; grid-template-columns: 1fr; gap: 24px; } 
-  .chart { width: 100%; height: 500px; border:1px solid #e5e7eb; border-radius: 6px; }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .chart { width: 100%; height: 420px; border:1px solid #e5e7eb; }
+  @media (max-width: 1000px) {
+    .chart-row { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>KRX 기업별 데이터 테이블</h1>
-  <div class="meta-top">생성 시각: 2025-12-07 23:27:51 KST · 타임존: Asia/Seoul</div>
+  <div class="meta-top">생성 시각: 2025-12-07 23:56:32 KST · 타임존: Asia/Seoul</div>
   <nav class="nav"><a href="#Samsung_Electronics_005930">Samsung_Electronics_005930</a><a href="#SK_hynix_000660">SK_hynix_000660</a><a href="#TCK_064760">TCK_064760</a><a href="#Reno_Industrial_058470">Reno_Industrial_058470</a><a href="#Samsung_Electro-Mechanics_009150">Samsung_Electro-Mechanics_009150</a><a href="#Isu_Petasys_007660">Isu_Petasys_007660</a><a href="#TLB_356860">TLB_356860</a></nav>
 </header>
 
@@ -1441,7 +1434,7 @@
 </section>
 
 <script>
-/* ===== 유틸 (동일 유지) ===== */
+/* ===== 유틸 ===== */
 function SMA(arr,n){const o=Array(arr.length).fill(null);let s=0,q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);s+=v;if(q.length>n)s-=q.shift();if(q.length===n)o[i]=s/n}return o}
 function EMA(arr,n){const o=Array(arr.length).fill(null);const k=2/(n+1);let p=null;for(let i=0;i<arr.length;i++){const v=+arr[i]||0;p=(p==null)?v:v*k+p*(1-k);o[i]=p}return o}
 function STD(arr,n){const o=Array(arr.length).fill(null);let q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);if(q.length>n)q.shift();if(q.length===n){const m=q.reduce((a,b)=>a+b,0)/n;const s2=q.reduce((a,b)=>a+(b-m)*(b-m),0)/n;o[i]=Math.sqrt(s2)}}return o}
@@ -1449,12 +1442,36 @@ function RSI(close,n=14){const o=Array(close.length).fill(null);let g=0,l=0;for(
 function MACD(close,f=12,s=26,sg=9){const ef=EMA(close,f),es=EMA(close,s),m=ef.map((v,i)=>v!=null&&es[i]!=null?v-es[i]:null),signal=EMA(m.map(v=>v??0),sg),h=m.map((v,i)=>v!=null&&signal[i]!=null?v-signal[i]:null);return{macd:m,signal,hist:h}}
 function bbBands(close,n=20,k=2){const ma=SMA(close,n),sd=STD(close,n),u=ma.map((m,i)=>m!=null&&sd[i]!=null?m+k*sd[i]:null),l=ma.map((m,i)=>m!=null&&sd[i]!=null?m-k*sd[i]:null);return{ma,upper:u,lower:l}}
 function nnum(x){if(x==null)return 0;return +String(x).replace(/,/g,'').replace(/\s+/g,'').replace(/%/g,'')||0}
-function str(x){return (x==null)?'':String(x)}
-function showError(secId,msg){const l=document.getElementById('chart-price-'+secId);const r=document.getElementById('chart-flow-'+secId);if(l)l.innerHTML='<div style="padding:12px;color:#b91c1c;font-size:13px">'+msg+'</div>';if(r)r.innerHTML='<div style="padding:12px;color:#b91c1c;font-size:13px">'+msg+'</div>'}
+const str = (x)=> (x==null ? '' : String(x));
+const cumsum = (arr)=>{let s=0; return arr.map(v=>{s += (+v||0); return s;});};
+const safeMax = (arr)=> Math.max( ...(arr.map(v=>+v||0).filter(v=>isFinite(v)&&!isNaN(v))), 0 );
 
-function idxOf(cols, primary, alts=[]){const i=cols.indexOf(primary);if(i>-1)return i;for(const a of alts){const j=cols.indexOf(a);if(j>-1)return j;}return -1;}
+/* 오름차순 정렬 보장: 날짜 문자열(YYYY-MM-DD) 비교 */
+function toAsc(date, ...series){
+  const N = date.length;
+  if (N < 2) return [date, ...series];
+  if (date[0] <= date[N-1]) return [date, ...series]; // 이미 오름차순
+  const rev = a => a.slice().reverse();
+  return [rev(date), ...series.map(rev)];
+}
 
-/* ===== 렌더링 함수 개선 ===== */
+/* 안전한 컬럼 인덱스 */
+function idxOf(cols, primary, alts=[]){
+  const i=cols.indexOf(primary);
+  if(i>-1) return i;
+  for(const a of alts){ const j=cols.indexOf(a); if(j>-1) return j; }
+  return -1;
+}
+
+/* 차트 오류 안내 */
+function showError(secId,msg){
+  for (const side of ['chart-price-','chart-flow-']){
+    const el = document.getElementById(side+secId);
+    if (el) el.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:13px">'+msg+'</div>';
+  }
+}
+
+/* ===== 렌더링 ===== */
 function renderOne(secId){
   const tag=document.getElementById('data-'+secId);
   if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
@@ -1469,91 +1486,98 @@ function renderOne(secId){
         iVol =idxOf(cols,'거래량',['Volume','volume']),
         iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
         iInst=idxOf(cols,'기관 합계',['기관합계']),
-        iShortR=idxOf(cols,'공매도비중',['공매도 거래량 비중','비중']),
-        iShortBR=idxOf(cols,'공매도잔고비중',['잔고비중']);
+        /* 공매도 비중/잔고비중의 다양한 표기 대응 */
+        iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
+        iShortBR=idxOf(cols,'공매도잔고비중',[
+          '공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)',
+          '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
+        ]);
 
-  if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락'); return; }
+  if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락(일자/시가/고가/저가/종가)'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
 
-  const date   = rows.map(r=>str(r[iDate]));
-  const open   = rows.map(r=>nnum(r[iOpen]));
-  const high   = rows.map(r=>nnum(r[iHigh]));
-  const low    = rows.map(r=>nnum(r[iLow]));
-  const close  = rows.map(r=>nnum(r[iClose]));
-  
-  const foreign= (iFor   >=0)? rows.map(r=>nnum(r[iFor]))  : rows.map(_=>0);
-  const inst   = (iInst  >=0)? rows.map(r=>nnum(r[iInst])) : rows.map(_=>0);
-  const shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
-  const shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
+  // 원자료 파싱
+  let date   = rows.map(r=>str(r[iDate]));
+  let open   = rows.map(r=>nnum(r[iOpen]));
+  let high   = rows.map(r=>nnum(r[iHigh]));
+  let low    = rows.map(r=>nnum(r[iLow]));
+  let close  = rows.map(r=>nnum(r[iClose]));
+  let vol    = (iVol>=0)? rows.map(r=>nnum(r[iVol])): rows.map(_=>0);
+  let foreign= (iFor>=0)? rows.map(r=>nnum(r[iFor])): rows.map(_=>0);
+  let inst   = (iInst>=0)? rows.map(r=>nnum(r[iInst])): rows.map(_=>0);
+  let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
+  let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
+  // ✅ 지표 계산 전에 오름차순(과거→현재)으로 정렬 보장
+  [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
+    toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
+
+  // 이동평균/보조지표 (이제 현재일까지 정상)
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
-  // [개선] 레이아웃: 주가 영역(70%), RSI(15%), MACD(15%)
+  // ✅ 기관/외국인 누적 순매수(선 그래프용)
+  const instCum    = cumsum(inst);
+  const foreignCum = cumsum(foreign);
+
+  /* -------- 차트 1: OHLC + MA + BB + RSI + MACD -------- */
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
-    xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'}, 
-    yaxis:{domain:[0.35,1.00], title:'주가 (원)', tickformat:',', showspikes:true}, // 메인 차트 영역 확대
-    xaxis2:{anchor:'y2', showspikes:true}, 
+    xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
+    yaxis:{domain:[0.35,1.00], title:'주가 (원)', tickformat:',', showspikes:true},
+    xaxis2:{anchor:'y2', showspikes:true},
     yaxis2:{domain:[0.18,0.30], title:'RSI', range:[0,100], tickvals:[30,70], showgrid:true},
-    xaxis3:{anchor:'y3', showspikes:true}, 
+    xaxis3:{anchor:'y3', showspikes:true},
     yaxis3:{domain:[0.00,0.15], title:'MACD'},
-    legend:{orientation:'h', y:1.02, x:0.5, xanchor:'center'}, // 범례 상단 중앙 배치
-    margin:{t:40,l:60,r:40,b:30}, 
+    legend:{orientation:'h', y:1.02, x:0.5, xanchor:'center'},
+    margin:{t:40,l:60,r:40,b:30},
     hovermode:'x unified',
-    plot_bgcolor: '#ffffff',
-    paper_bgcolor: '#ffffff'
+    plot_bgcolor:'#ffffff', paper_bgcolor:'#ffffff'
   };
 
   const traces1=[
-    // [개선] 캔들스틱 색상: 한국형 (상승:빨강/하락:파랑)
-    {type:'candlestick',x:date,open,high,low,close,name:'주가',xaxis:'x',yaxis:'y',
+    {type:'candlestick',x:date,open,high,low,close,name:'주가',
      increasing:{line:{color:'#ef4444'}}, decreasing:{line:{color:'#3b82f6'}} },
-    
-    // 이동평균선: 색상 구분 명확화
-    {type:'scatter',mode:'lines',x:date,y:ma20,name:'MA20',xaxis:'x',yaxis:'y', line:{color:'#f59e0b', width:1.5}},
-    {type:'scatter',mode:'lines',x:date,y:ma60,name:'MA60',xaxis:'x',yaxis:'y', line:{color:'#10b981', width:1.5}},
-    {type:'scatter',mode:'lines',x:date,y:ma120,name:'MA120',xaxis:'x',yaxis:'y', line:{color:'#6366f1', width:1.5}},
-    
-    // [개선] 볼린저밴드: 기본적으로 숨김 (legendonly) 처리하여 차트 깔끔하게 시작
-    {type:'scatter',mode:'lines',x:date,y:bb.upper,name:'BB상단',xaxis:'x',yaxis:'y', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
-    {type:'scatter',mode:'lines',x:date,y:bb.lower,name:'BB하단',xaxis:'x',yaxis:'y', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
-    
-    // 보조지표
+    {type:'scatter',mode:'lines',x:date,y:ma20,name:'MA20', line:{color:'#f59e0b', width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma60,name:'MA60', line:{color:'#10b981', width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma120,name:'MA120', line:{color:'#6366f1', width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:bb.upper,name:'BB상단', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:bb.lower,name:'BB하단', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
     {type:'scatter',mode:'lines',x:date,y:rsi,name:'RSI(14)',xaxis:'x2',yaxis:'y2', line:{color:'#8b5cf6'}},
     {type:'bar',x:date,y:hist,name:'MACD Hist',xaxis:'x3',yaxis:'y3', marker:{color:'#d1d5db'}},
     {type:'scatter',mode:'lines',x:date,y:macd,name:'MACD',xaxis:'x3',yaxis:'y3', line:{color:'#ef4444', width:1}},
     {type:'scatter',mode:'lines',x:date,y:signal,name:'Signal',xaxis:'x3',yaxis:'y3', line:{color:'#3b82f6', width:1}},
   ];
-  
-  // RSI 기준선 (30, 70) 추가
+
+  // RSI 가이드라인
   layout1.shapes = [
     {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:70, y1:70, line:{color:'red', width:1, dash:'dot'}},
     {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:30, y1:30, line:{color:'blue', width:1, dash:'dot'}}
   ];
 
-  Plotly.newPlot('chart-price-'+secId,traces1,layout1,{responsive:true,displaylogo:false});
+  Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
-  // [개선] 수급/공매도 차트 레이아웃
+  /* -------- 차트 2: 누적 수급(선) + 공매도 비중(선) -------- */
   const layout2={
-    barmode:'group', // relative -> group 변경으로 매수/매도 비교 용이하게
-    yaxis:{title:'순매수 수량', tickformat:',', showgrid:true},
-    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right', range:[0, Math.max(...shortBR, ...shortR)*1.2], showgrid:false},
-    margin:{t:40,l:60,r:50,b:30}, 
+    yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
+    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
+           range:[0, Math.max(1, safeMax(shortBR.concat(shortR))*1.2)]},
+    margin:{t:40,l:60,r:50,b:30},
     hovermode:'x unified',
     legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
-    plot_bgcolor: '#ffffff'
+    plot_bgcolor:'#ffffff'
   };
-  
+
   const traces2=[
-    {type:'bar',x:date,y:inst,name:'기관 순매수', marker:{color:'#fbbf24', opacity:0.8}},
-    {type:'bar',x:date,y:foreign,name:'외국인 순매수', marker:{color:'#10b981', opacity:0.8}},
-    {type:'scatter',mode:'lines',x:date,y:shortR,name:'공매도비중(%)',yaxis:'y2', line:{color:'#ef4444', width:1, dash:'dot'}},
-    {type:'scatter',mode:'lines',x:date,y:shortBR,name:'공매도잔고비중(%)',yaxis:'y2', line:{color:'#6366f1', width:2}},
+    {type:'scatter',mode:'lines',x:date,y:instCum,   name:'기관 누적',   line:{width:2}},
+    {type:'scatter',mode:'lines',x:date,y:foreignCum,name:'외국인 누적', line:{width:2}},
+    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot'}},
+    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2'},
   ];
-  Plotly.newPlot('chart-flow-'+secId,traces2,layout2,{responsive:true,displaylogo:false});
+
+  Plotly.newPlot('chart-flow-'+secId, traces2, layout2, {responsive:true, displaylogo:false});
 }
 
 (function main(){
@@ -1562,7 +1586,7 @@ function renderOne(secId){
 })();
 </script>
 
-<footer style="margin-top:60px; padding: 20px 0; border-top: 1px solid #e5e7eb; color:#6b7280; font-size:13px; text-align: center;">
+<footer style="margin-top:40px;color:#666;font-size:12px">
   Published via GitHub Pages · Inline JSON rendering (CORS-free)
 </footer>
 </body>
