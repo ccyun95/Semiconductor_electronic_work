@@ -124,21 +124,43 @@ def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     keep = ["일자","기관 합계","기타법인","개인","외국인 합계","전체"]
     return df[keep]
 
+def clean_num_series(s: pd.Series) -> pd.Series:
+    """문자열 내 콤마/공백/% 제거 후 숫자로 변환"""
+    if s is None:
+        return pd.Series(dtype="float64")
+    if not isinstance(s, pd.Series):
+        s = pd.Series(s)
+    return (
+        s.astype(str)
+         .str.replace(",", "", regex=False)
+         .str.replace("%", "", regex=False)
+         .str.replace(" ", "", regex=False)
+         .replace({"": None, "nan": None})
+         .pipe(pd.to_numeric, errors="coerce")
+    )
+
 def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
     if df is None or df.empty or "일자" not in df.columns:
         return empty_with_cols(["일자"] + (["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]))
     dfc = df.copy()
+    # 후보 키 폭넓게 탐색
+    def pick(colnames, keywords):
+        for c in colnames:
+            if any(k in c for k in keywords):
+                return c
+        return None
+
     if is_balance:
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고","잔고","BAL_QTY"])), None)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고비중","잔고비중","BAL_RTO"])), None)
-        dfc["공매도잔고"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도잔고비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        amt_col = pick(dfc.columns, ["공매도잔고", "잔고", "BAL_QTY"])
+        rto_col = pick(dfc.columns, ["공매도잔고비중", "잔고비중", "BAL_RTO", "비중", "비율"])
+        dfc["공매도잔고"]     = clean_num_series(dfc[amt_col]) if amt_col else 0
+        dfc["공매도잔고비중"] = clean_num_series(dfc[rto_col]) if rto_col else 0.0
         return dfc[["일자","공매도잔고","공매도잔고비중"]]
     else:
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도","공매도거래량","거래량"])), None)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도비중","비중"])), None)
-        dfc["공매도"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        amt_col = pick(dfc.columns, ["공매도", "공매도거래량", "거래량"])
+        rto_col = pick(dfc.columns, ["공매도비중", "비중"])
+        dfc["공매도"]   = clean_num_series(dfc[amt_col]) if amt_col else 0
+        dfc["공매도비중"] = clean_num_series(dfc[rto_col]) if rto_col else 0.0
         return dfc[["일자","공매도","공매도비중"]]
 
 def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -250,7 +272,6 @@ def emit_index_html(companies, rows_limit=None):
             df = df.head(int(rows_limit))
 
         columns = [str(c) for c in df.columns]
-        # 표 출력용 문자열화
         rows = df.astype(object).where(pd.notna(df), "").astype(str).values.tolist()
 
         thead = "".join(f"<th>{_html.escape(c)}</th>" for c in columns)
@@ -259,15 +280,14 @@ def emit_index_html(companies, rows_limit=None):
         )
         sec_id = f"{name}_{str(ticker).zfill(6)}"
 
-        # ✅ 차트용 데이터(payload)는 순수 JSON으로 만들고, </script>만 이스케이프
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
             "columns": columns,
-            "rows": rows,  # 문자열/숫자 혼재 OK
+            "rows": rows,
         }
         json_raw = json.dumps(payload, ensure_ascii=False)
-        json_safe = json_raw.replace("</", "<\\/")  # </script> 차단만 수행
+        json_safe = json_raw.replace("</", "<\\/")  # </script> 차단
 
         sections.append(f"""
 <section id="{_html.escape(sec_id)}">
@@ -281,17 +301,14 @@ def emit_index_html(companies, rows_limit=None):
       <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
     </div>
     <div class="charts">
-      <div class="chart-row">
-        <div id="chart-price-{_html.escape(sec_id)}" class="chart"></div>
-        <div id="chart-flow-{_html.escape(sec_id)}" class="chart"></div>
-      </div>
+      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <div class="chart" id="chart-price-{_html.escape(sec_id)}"></div>
+      <div class="chart" id="chart-flow-{_html.escape(sec_id)}"></div>
     </div>
   </div>
-  <!-- 차트용 inline JSON (절대 html.escape 금지) -->
   <script id="data-{_html.escape(sec_id)}" type="application/json">{json_safe}</script>
 </section>""")
 
-    # 섹션 네비
     def _id_from(sec_html: str) -> str:
         try:
             return sec_html.split('id="', 1)[1].split('"', 1)[0]
@@ -326,12 +343,8 @@ def emit_index_html(companies, rows_limit=None):
   th:first-child, td:first-child { text-align: left; white-space: nowrap; }
   thead th { position: sticky; top:0; background:#fafafa; }
   .meta { color:#666; font-size:12px; }
-  .charts { width: 100%; }
-  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .chart { width: 100%; height: 420px; border:1px solid #e5e7eb; }
-  @media (max-width: 1000px) {
-    .chart-row { grid-template-columns: 1fr; }
-  }
+  .charts { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+  .chart { width: 100%; height: 560px; border:1px solid #e5e7eb; }
 </style>
 </head>
 <body>
@@ -356,16 +369,15 @@ const str = (x)=> (x==null ? '' : String(x));
 const cumsum = (arr)=>{let s=0; return arr.map(v=>{s += (+v||0); return s;});};
 const safeMax = (arr)=> Math.max( ...(arr.map(v=>+v||0).filter(v=>isFinite(v)&&!isNaN(v))), 0 );
 
-/* 오름차순 정렬 보장: 날짜 문자열(YYYY-MM-DD) 비교 */
+/* 오름차순 정렬 보장 */
 function toAsc(date, ...series){
   const N = date.length;
   if (N < 2) return [date, ...series];
-  if (date[0] <= date[N-1]) return [date, ...series]; // 이미 오름차순
+  if (date[0] <= date[N-1]) return [date, ...series];
   const rev = a => a.slice().reverse();
   return [rev(date), ...series.map(rev)];
 }
 
-/* 안전한 컬럼 인덱스 */
 function idxOf(cols, primary, alts=[]){
   const i=cols.indexOf(primary);
   if(i>-1) return i;
@@ -373,7 +385,6 @@ function idxOf(cols, primary, alts=[]){
   return -1;
 }
 
-/* 차트 오류 안내 */
 function showError(secId,msg){
   for (const side of ['chart-price-','chart-flow-']){
     const el = document.getElementById(side+secId);
@@ -396,17 +407,12 @@ function renderOne(secId){
         iVol =idxOf(cols,'거래량',['Volume','volume']),
         iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
         iInst=idxOf(cols,'기관 합계',['기관합계']),
-        /* 공매도 비중/잔고비중의 다양한 표기 대응 */
         iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
-        iShortBR=idxOf(cols,'공매도잔고비중',[
-          '공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)',
-          '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
-        ]);
+        iShortBR=idxOf(cols,'공매도잔고비중',['공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)','잔고비중','잔고 비중','공매도잔고비율','잔고비율']);
 
   if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락(일자/시가/고가/저가/종가)'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
 
-  // 원자료 파싱
   let date   = rows.map(r=>str(r[iDate]));
   let open   = rows.map(r=>nnum(r[iOpen]));
   let high   = rows.map(r=>nnum(r[iHigh]));
@@ -418,21 +424,17 @@ function renderOne(secId){
   let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
   let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
-  // ✅ 지표 계산 전에 오름차순(과거→현재)으로 정렬 보장
   [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
     toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
 
-  // 이동평균/보조지표 (이제 현재일까지 정상)
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
-  // ✅ 기관/외국인 누적 순매수(선 그래프용)
   const instCum    = cumsum(inst);
   const foreignCum = cumsum(foreign);
 
-  /* -------- 차트 1: OHLC + MA + BB + RSI + MACD -------- */
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
     xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
@@ -469,7 +471,6 @@ function renderOne(secId){
 
   Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
-  /* -------- 차트 2: 누적 수급(선) + 공매도 비중(선) -------- */
   const layout2={
     yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
     yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
