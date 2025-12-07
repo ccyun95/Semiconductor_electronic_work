@@ -3,6 +3,7 @@
 KRX 수집/업데이트 → per-ticker JSON → 표 + 2개 차트(index.html)
 - 차트 데이터는 섹션마다 inline JSON으로 넣어 CORS 없이 file://에서도 동작
 - GitHub Pages에서도 동작(외부 fetch 없이 inline만으로 렌더)
+- 공매도잔고비중 매핑 버그 수정 및 차트 디자인 개선 완료
 
 CSV 스키마:
 일자,시가,고가,저가,종가,거래량,등락률,기관 합계,기타법인,개인,외국인 합계,전체,공매도,공매도비중,공매도잔고,공매도잔고비중
@@ -124,6 +125,33 @@ def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     keep = ["일자","기관 합계","기타법인","개인","외국인 합계","전체"]
     return df[keep]
 
+def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
+    """
+    공매도/공매도잔고 관련 컬럼을 표준화합니다.
+    [수정] '비중' 키워드를 추가하여 PyKRX에서 '비중'으로만 들어오는 데이터를 놓치지 않도록 함.
+    """
+    if df is None or df.empty or "일자" not in df.columns:
+        return empty_with_cols(["일자"] + (["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]))
+    
+    dfc = df.copy()
+    if is_balance:
+        # 잔고 관련 컬럼 찾기
+        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고","잔고","BAL_QTY"])), None)
+        # 잔고비중 관련 컬럼 찾기 (여기에 '비중' 추가가 핵심)
+        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고비중","잔고비중","BAL_RTO", "비중"])), None)
+        
+        dfc["공매도잔고"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
+        dfc["공매도잔고비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        return dfc[["일자","공매도잔고","공매도잔고비중"]]
+    else:
+        # 거래량 관련 컬럼
+        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도","공매도거래량","거래량"])), None)
+        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도비중","비중"])), None)
+        
+        dfc["공매도"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
+        dfc["공매도비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
+        return dfc[["일자","공매도","공매도비중"]]
+
 def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQ_COLS:
         if col not in df.columns:
@@ -134,18 +162,22 @@ def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd
     s, e = yyyymmdd(start_d), yyyymmdd(end_d)
     ohlcv = stock.get_market_ohlcv(s, e, ticker); df1 = normalize_date_index(ohlcv)
     inv   = stock.get_market_trading_volume_by_date(s, e, ticker); df2 = rename_investor_cols(normalize_date_index(inv))
+    
     try: sv = stock.get_shorting_volume_by_date(s, e, ticker)
     except Exception: sv = pd.DataFrame()
-    df3 = normalize_date_index(sv)
+    df3 = rename_short_cols(normalize_date_index(sv), is_balance=False)
+    
     try: sb = stock.get_shorting_balance_by_date(s, e, ticker)
     except Exception: sb = pd.DataFrame()
-    df4 = normalize_date_index(sb)
+    df4 = rename_short_cols(normalize_date_index(sb), is_balance=True)
 
-    # 열 이름은 수집단계에서 손대지 않음(원 CSV를 그대로 쓰기 위함)
     df = df1.merge(df2, on="일자", how="left").merge(df3, on="일자", how="left").merge(df4, on="일자", how="left")
     df = ensure_all_cols(df)
+    
+    # 수치형 변환 보장
     for c in [c for c in df.columns if c != "일자"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        
     df = df.sort_values("일자", ascending=not SORT_DESC)
     return df
 
@@ -156,6 +188,9 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
 
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
+        # [수정] CSV 로드 시 컬럼 공백 제거 (안전장치)
+        base.columns = [str(c).strip() for c in base.columns]
+        
         if base.empty:
             last_have = None
         else:
@@ -176,6 +211,8 @@ def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
 
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
+        base.columns = [str(c).strip() for c in base.columns] # 안전장치
+        
         merged = pd.concat([base, df], ignore_index=True)
         merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
         merged = merged.sort_values("일자", ascending=not SORT_DESC)
@@ -204,14 +241,14 @@ def emit_per_ticker_json(companies, rows_limit=None):
         if df.empty:
             continue
 
-        # ✅ CSV 열 이름을 그대로 사용하되, 공백/숨은문자 제거
+        # [수정] 컬럼 공백 제거 (매핑 오류 방지)
         df.columns = [str(c).strip() for c in df.columns]
 
         df_use = df.head(int(rows_limit)) if rows_limit else df
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
-            "columns": list(df_use.columns),  # ← trim 적용된 이름
+            "columns": list(df_use.columns),
             "rows": df_use.astype(object).where(pd.notna(df_use), "").values.tolist(),
             "generated_at": kst_now().strftime("%Y-%m-%d %H:%M:%S %Z")
         }
@@ -240,11 +277,12 @@ def emit_index_html(companies, rows_limit=None):
             df = pd.read_csv(csv_path)
         if df.empty:
             continue
+        
+        # [수정] 컬럼 공백 제거 (매핑 오류 방지)
+        df.columns = [str(c).strip() for c in df.columns]
+        
         if rows_limit:
             df = df.head(int(rows_limit))
-
-        # ✅ 컬럼명 trim (CSV→HTML 섹션)
-        df.columns = [str(c).strip() for c in df.columns]
 
         columns = [str(c) for c in df.columns]
         rows = df.astype(object).where(pd.notna(df), "").astype(str).values.tolist()
@@ -258,7 +296,7 @@ def emit_index_html(companies, rows_limit=None):
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
-            "columns": columns,  # ← trim 적용된 이름
+            "columns": columns,
             "rows": rows,
         }
         json_raw = json.dumps(payload, ensure_ascii=False)
@@ -276,9 +314,8 @@ def emit_index_html(companies, rows_limit=None):
       <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
     </div>
     <div class="charts">
-      <!-- 차트 세로 스택(크게) -->
-      <div class="chart" id="chart-price-{_html.escape(sec_id)}"></div>
-      <div class="chart" id="chart-flow-{_html.escape(sec_id)}"></div>
+      <div id="chart-price-{_html.escape(sec_id)}" class="chart"></div>
+      <div id="chart-flow-{_html.escape(sec_id)}" class="chart"></div>
     </div>
   </div>
   <script id="data-{_html.escape(sec_id)}" type="application/json">{json_safe}</script>
@@ -292,6 +329,7 @@ def emit_index_html(companies, rows_limit=None):
 
     nav = "".join(f'<a href="#{_id_from(s)}">{_id_from(s)}</a>' for s in sections)
 
+    # [수정] 개선된 CSS 및 Plotly 설정 적용
     html_template = Template("""<!doctype html>
 <html lang="ko">
 <head>
@@ -303,22 +341,32 @@ def emit_index_html(companies, rows_limit=None):
 <title>KRX 기업별 데이터 테이블</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-  header { margin-bottom: 20px; }
-  .meta-top { color:#666; font-size:14px; }
-  .nav { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }
-  .nav a { font-size:13px; text-decoration:none; color:#2563eb; }
-  section { margin: 32px 0; }
-  h2 { font-size: 18px; margin: 12px 0; }
-  .grid { display: flex; flex-direction: column; gap: 12px; }
-  .scroll { overflow:auto; max-height: 50vh; border:1px solid #e5e7eb; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }
-  th:first-child, td:first-child { text-align: left; white-space: nowrap; }
-  thead th { position: sticky; top:0; background:#fafafa; }
-  .meta { color:#666; font-size:12px; }
-  .charts { width: 100%; display: flex; flex-direction: column; gap: 12px; }
-  .chart { width: 100%; height: 560px; border:1px solid #e5e7eb; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", Roboto, Arial, sans-serif; margin: 24px; background-color: #f9fafb; }
+  header { margin-bottom: 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 16px; }
+  h1 { margin: 0 0 8px 0; font-size: 24px; color: #111827; }
+  .meta-top { color:#6b7280; font-size:14px; }
+  .nav { display:flex; flex-wrap:wrap; gap:8px 12px; margin-top:12px; }
+  .nav a { font-size:14px; text-decoration:none; color:#2563eb; background: #eff6ff; padding: 4px 8px; border-radius: 4px; }
+  .nav a:hover { background: #dbeafe; }
+  
+  section { margin: 40px 0; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  h2 { font-size: 20px; margin: 0 0 16px 0; border-left: 4px solid #2563eb; padding-left: 12px; color: #1f2937; }
+  
+  .grid { display: flex; flex-direction: column; gap: 20px; }
+  
+  /* 표 스타일 개선 */
+  .scroll { overflow:auto; max-height: 400px; border:1px solid #e5e7eb; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  th, td { border-bottom: 1px solid #e5e7eb; padding: 8px 12px; text-align: right; }
+  th { position: sticky; top:0; background:#f3f4f6; color: #374151; font-weight: 600; border-bottom: 2px solid #e5e7eb; }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: inherit; border-right: 1px solid #e5e7eb; }
+  tr:hover td { background-color: #f9fafb; }
+  
+  .meta { color:#9ca3af; font-size:12px; margin-top: 8px; text-align: right; }
+  
+  /* 차트 레이아웃 개선 */
+  .charts { width: 100%; display: flex; flex-direction: column; gap: 24px; }
+  .chart { width: 100%; height: 500px; border:1px solid #e5e7eb; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -341,7 +389,6 @@ function bbBands(close,n=20,k=2){const ma=SMA(close,n),sd=STD(close,n),u=ma.map(
 function nnum(x){if(x==null)return 0;return +String(x).replace(/,/g,'').replace(/\\s+/g,'').replace(/%/g,'')||0}
 const str = (x)=> (x==null ? '' : String(x));
 const cumsum = (arr)=>{let s=0; return arr.map(v=>{s += (+v||0); return s;});};
-const safeMax = (arr)=> Math.max( ...(arr.map(v=>+v||0).filter(v=>isFinite(v)&&!isNaN(v))), 0 );
 
 /* 오름차순 정렬 보장 */
 function toAsc(date, ...series){
@@ -372,7 +419,7 @@ function renderOne(secId){
   if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
   let j=null; try{ j=JSON.parse(tag.textContent); }catch(e){ showError(secId,'섹션 데이터 파싱 실패: '+e); return; }
 
-  // ✅ CSV→JSON에서 이미 trim했지만, JS에서도 한 번 더 안전 처리
+  // 컬럼 공백 제거 안전장치
   const cols = (j.columns || []).map(c => String(c).trim());
 
   const iDate=idxOf(cols,'일자',['\\ufeff일자','DATE','date']),
@@ -389,7 +436,7 @@ function renderOne(secId){
           '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
         ]);
 
-  if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락(일자/시가/고가/저가/종가)'); return; }
+  if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
 
   let date   = rows.map(r=>str(r[iDate]));
@@ -403,21 +450,17 @@ function renderOne(secId){
   let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
   let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
-  // 지표 계산 전에 오름차순(과거→현재)으로 정렬
+  // 차트 그리기를 위해 날짜 오름차순 정렬
   [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
     toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
 
-  // 이동평균/보조지표
+  // 지표 계산
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
-  // 기관/외국인 누적
-  const instCum    = cumsum(inst);
-  const foreignCum = cumsum(foreign);
-
-  // -------- 차트 1 --------
+  // -------- 차트 1: 주가/보조지표 --------
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
     xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
@@ -446,7 +489,6 @@ function renderOne(secId){
     {type:'scatter',mode:'lines',x:date,y:signal,name:'Signal',xaxis:'x3',yaxis:'y3', line:{color:'#3b82f6', width:1}},
   ];
 
-  // RSI 가이드라인
   layout1.shapes = [
     {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:70, y1:70, line:{color:'red', width:1, dash:'dot'}},
     {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:30, y1:30, line:{color:'blue', width:1, dash:'dot'}}
@@ -454,11 +496,12 @@ function renderOne(secId){
 
   Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
-  // -------- 차트 2 --------
+  // -------- 차트 2: 수급/공매도 --------
   const layout2={
-    yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
-    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
-           range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
+    barmode:'group',
+    yaxis:{title:'순매수 수량', tickformat:',', showgrid:true},
+    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right', showgrid:false,
+            range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
     margin:{t:40,l:60,r:50,b:30},
     hovermode:'x unified',
     legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
@@ -466,10 +509,10 @@ function renderOne(secId){
   };
 
   const traces2=[
-    {type:'scatter',mode:'lines',x:date,y:instCum,   name:'기관 누적',   line:{width:2}},
-    {type:'scatter',mode:'lines',x:date,y:foreignCum,name:'외국인 누적', line:{width:2}},
-    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot'}},
-    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2'},
+    {type:'bar',x:date,y:inst,name:'기관 순매수', marker:{color:'#fbbf24', opacity:0.6}},
+    {type:'bar',x:date,y:foreign,name:'외국인 순매수', marker:{color:'#10b981', opacity:0.6}},
+    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot', color:'#ef4444', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2', line:{color:'#6366f1', width:2}},
   ];
 
   Plotly.newPlot('chart-flow-'+secId, traces2, layout2, {responsive:true, displaylogo:false});
@@ -481,7 +524,7 @@ function renderOne(secId){
 })();
 </script>
 
-<footer style="margin-top:40px;color:#666;font-size:12px">
+<footer style="margin-top:60px; padding: 20px 0; border-top: 1px solid #e5e7eb; color:#6b7280; font-size:13px; text-align: center;">
   Published via GitHub Pages · Inline JSON rendering (CORS-free)
 </footer>
 </body>
