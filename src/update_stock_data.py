@@ -39,6 +39,7 @@ REQ_COLS = [
 ]
 
 KST = tz.gettz("Asia/Seoul")
+# pykrx 내부 잘못된 logging.format 호출 묵음
 for name in ["pykrx", "pykrx.website", "pykrx.website.comm", "pykrx.website.comm.util"]:
     logging.getLogger(name).disabled = True
 
@@ -249,6 +250,7 @@ def emit_index_html(companies, rows_limit=None):
             df = df.head(int(rows_limit))
 
         columns = [str(c) for c in df.columns]
+        # 표 출력용 문자열화
         rows = df.astype(object).where(pd.notna(df), "").astype(str).values.tolist()
 
         thead = "".join(f"<th>{_html.escape(c)}</th>" for c in columns)
@@ -257,15 +259,17 @@ def emit_index_html(companies, rows_limit=None):
         )
         sec_id = f"{name}_{str(ticker).zfill(6)}"
 
-        # 표 + 차트 컨테이너 + inline JSON
+        # ✅ 차트용 데이터(payload)는 순수 JSON으로 만들고, </script>만 이스케이프
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
             "columns": columns,
-            "rows": rows,
+            "rows": rows,  # 문자열/숫자 혼재 OK
         }
-        sections.append(
-            f"""
+        json_raw = json.dumps(payload, ensure_ascii=False)
+        json_safe = json_raw.replace("</", "<\\/")  # </script> 차단만 수행
+
+        sections.append(f"""
 <section id="{_html.escape(sec_id)}">
   <h2>{_html.escape(name)} ({str(ticker).zfill(6)})</h2>
   <div class="grid">
@@ -283,9 +287,9 @@ def emit_index_html(companies, rows_limit=None):
       </div>
     </div>
   </div>
-  <script id="data-{_html.escape(sec_id)}" type="application/json">{_html.escape(json.dumps(payload, ensure_ascii=False))}</script>
-</section>"""
-        )
+  <!-- 차트용 inline JSON (절대 html.escape 금지) -->
+  <script id="data-{_html.escape(sec_id)}" type="application/json">{json_safe}</script>
+</section>""")
 
     # 섹션 네비
     def _id_from(sec_html: str) -> str:
@@ -296,7 +300,7 @@ def emit_index_html(companies, rows_limit=None):
 
     nav = "".join(f'<a href="#{_id_from(s)}">{_id_from(s)}</a>' for s in sections)
 
-    # ⚠️ f-string 금지! Template로 치환 (중괄호 충돌 방지)
+    # f-string 대신 Template 사용(중괄호 충돌 방지)
     html_template = Template("""<!doctype html>
 <html lang="ko">
 <head>
