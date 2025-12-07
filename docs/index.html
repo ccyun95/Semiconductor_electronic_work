@@ -30,7 +30,7 @@
 <body>
 <header>
   <h1>KRX 기업별 데이터 테이블</h1>
-  <div class="meta-top">생성 시각: 2025-12-08 00:08:01 KST · 타임존: Asia/Seoul</div>
+  <div class="meta-top">생성 시각: 2025-12-08 00:25:26 KST · 타임존: Asia/Seoul</div>
   <nav class="nav"><a href="#Samsung_Electronics_005930">Samsung_Electronics_005930</a><a href="#SK_hynix_000660">SK_hynix_000660</a><a href="#TCK_064760">TCK_064760</a><a href="#Reno_Industrial_058470">Reno_Industrial_058470</a><a href="#Samsung_Electro-Mechanics_009150">Samsung_Electro-Mechanics_009150</a><a href="#Isu_Petasys_007660">Isu_Petasys_007660</a><a href="#TLB_356860">TLB_356860</a></nav>
 </header>
 
@@ -225,7 +225,7 @@
       <p class="meta">rows: 180 · source: data/Samsung_Electronics_stock_data.csv · json: api/Samsung_Electronics_005930.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-Samsung_Electronics_005930"></div>
       <div class="chart" id="chart-flow-Samsung_Electronics_005930"></div>
     </div>
@@ -422,7 +422,7 @@
       <p class="meta">rows: 180 · source: data/SK_hynix_stock_data.csv · json: api/SK_hynix_000660.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-SK_hynix_000660"></div>
       <div class="chart" id="chart-flow-SK_hynix_000660"></div>
     </div>
@@ -619,7 +619,7 @@
       <p class="meta">rows: 180 · source: data/TCK_stock_data.csv · json: api/TCK_064760.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-TCK_064760"></div>
       <div class="chart" id="chart-flow-TCK_064760"></div>
     </div>
@@ -816,7 +816,7 @@
       <p class="meta">rows: 180 · source: data/Reno_Industrial_stock_data.csv · json: api/Reno_Industrial_058470.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-Reno_Industrial_058470"></div>
       <div class="chart" id="chart-flow-Reno_Industrial_058470"></div>
     </div>
@@ -1013,7 +1013,7 @@
       <p class="meta">rows: 180 · source: data/Samsung_Electro-Mechanics_stock_data.csv · json: api/Samsung_Electro-Mechanics_009150.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-Samsung_Electro-Mechanics_009150"></div>
       <div class="chart" id="chart-flow-Samsung_Electro-Mechanics_009150"></div>
     </div>
@@ -1210,7 +1210,7 @@
       <p class="meta">rows: 180 · source: data/Isu_Petasys_stock_data.csv · json: api/Isu_Petasys_007660.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-Isu_Petasys_007660"></div>
       <div class="chart" id="chart-flow-Isu_Petasys_007660"></div>
     </div>
@@ -1407,7 +1407,7 @@
       <p class="meta">rows: 180 · source: data/TLB_stock_data.csv · json: api/TLB_356860.json</p>
     </div>
     <div class="charts">
-      <!-- ✅ 세로 배치: 차트1, 그 아래 차트2 -->
+      <!-- 차트 세로 스택(크게) -->
       <div class="chart" id="chart-price-TLB_356860"></div>
       <div class="chart" id="chart-flow-TLB_356860"></div>
     </div>
@@ -1457,7 +1457,9 @@ function renderOne(secId){
   if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
   let j=null; try{ j=JSON.parse(tag.textContent); }catch(e){ showError(secId,'섹션 데이터 파싱 실패: '+e); return; }
 
-  const cols=j.columns||[];
+  // ✅ CSV→JSON에서 이미 trim했지만, JS에서도 한 번 더 안전 처리
+  const cols = (j.columns || []).map(c => String(c).trim());
+
   const iDate=idxOf(cols,'일자',['\ufeff일자','DATE','date']),
         iOpen=idxOf(cols,'시가',['Open','open']),
         iHigh=idxOf(cols,'고가',['High','high']),
@@ -1467,7 +1469,10 @@ function renderOne(secId){
         iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
         iInst=idxOf(cols,'기관 합계',['기관합계']),
         iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
-        iShortBR=idxOf(cols,'공매도잔고비중',['공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)','잔고비중','잔고 비중','공매도잔고비율','잔고비율']);
+        iShortBR=idxOf(cols,'공매도잔고비중',[
+          '공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)',
+          '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
+        ]);
 
   if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락(일자/시가/고가/저가/종가)'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
@@ -1483,17 +1488,21 @@ function renderOne(secId){
   let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
   let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
+  // 지표 계산 전에 오름차순(과거→현재)으로 정렬
   [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
     toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
 
+  // 이동평균/보조지표
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
+  // 기관/외국인 누적
   const instCum    = cumsum(inst);
   const foreignCum = cumsum(foreign);
 
+  // -------- 차트 1 --------
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
     xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
@@ -1530,10 +1539,11 @@ function renderOne(secId){
 
   Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
+  // -------- 차트 2 --------
   const layout2={
     yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
     yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
-           range:[0, Math.max(1, safeMax(shortBR.concat(shortR))*1.2)]},
+           range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
     margin:{t:40,l:60,r:50,b:30},
     hovermode:'x unified',
     legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
