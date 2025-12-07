@@ -1,37 +1,23 @@
-# -*- coding: utf-8 -*-
-"""
-KRX 수집/업데이트 → per-ticker JSON → 표 + 2개 차트(index.html)
-- 차트 데이터는 섹션마다 inline JSON으로 넣어 CORS 없이 file://에서도 동작
-- GitHub Pages에서도 동작(외부 fetch 없이 inline만으로 렌더)
-- 공매도잔고비중 매핑 버그 수정 및 차트 디자인 개선 완료
-
-CSV 스키마:
-일자,시가,고가,저가,종가,거래량,등락률,기관 합계,기타법인,개인,외국인 합계,전체,공매도,공매도비중,공매도잔고,공매도잔고비중
-"""
 import argparse
-import json
 import logging
 import os
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil import tz
 import time
 import pandas as pd
-
 from pykrx import stock
 
 # =========================
 # 설정
 # =========================
 DATA_DIR = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "data"
-DOCS_DIR = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "docs"
-API_DIR = DOCS_DIR / "api"
-
 OUTPUT_SUFFIX = "_stock_data.csv"
-ENCODING = "utf-8-sig"
-SLEEP_SEC = 0.3
-WINDOW_DAYS_INIT = 370
-SORT_DESC = True  # 최신→과거
+ENCODING = "utf-8-sig"     # 엑셀 호환
+SLEEP_SEC = 0.3            # API 과호출 방지
+WINDOW_DAYS_INIT = 370     # 신규 생성 시 과거 1년+α
+BACKFILL_CAL_DAYS_FOR_SHORT = 10  # 공매도잔고/비중 지연 공개 보정용 최소 재수집 구간(캘린더 일수)
 
 REQ_COLS = [
     "일자","시가","고가","저가","종가","거래량","등락률",
@@ -40,18 +26,16 @@ REQ_COLS = [
 ]
 
 KST = tz.gettz("Asia/Seoul")
-# pykrx 내부 잘못된 logging.format 호출 묵음
+
+# pykrx 내부 로그 묵음
 for name in ["pykrx", "pykrx.website", "pykrx.website.comm", "pykrx.website.comm.util"]:
     logging.getLogger(name).disabled = True
 
 # =========================
 # 유틸
 # =========================
-def kst_now():
-    return datetime.now(tz=KST)
-
 def kst_today_date():
-    return kst_now().date()
+    return datetime.now(tz=KST).date()
 
 def yyyymmdd(d):
     return d.strftime("%Y%m%d")
@@ -59,7 +43,7 @@ def yyyymmdd(d):
 def empty_with_cols(cols):
     data = {}
     for c in cols:
-        data[c] = pd.Series(dtype="object" if c == "일자" else "float64")
+        data[c] = pd.Series(dtype="object") if c == "일자" else pd.Series(dtype="float64")
     return pd.DataFrame(data)
 
 def read_company_list(path: Path):
@@ -79,21 +63,17 @@ def read_company_list(path: Path):
                     logging.warning("기업 라인 파싱 불가: %s", line)
                     continue
                 name, ticker = parts[0], parts[1]
-            ticker = ticker.zfill(6)
-            rows.append((name, ticker))
+            rows.append((name, ticker.zfill(6)))
     return rows
 
-def csv_path_for(eng_name: str, _ticker: str) -> Path:
-    return DATA_DIR / f"{eng_name}{OUTPUT_SUFFIX}"
-
-def last_trading_day_by_ohlcv(ticker: str, today: datetime.date):
+def last_trading_day_by_ohlcv(ticker: str, today):
     start = today - timedelta(days=30)
     df = stock.get_market_ohlcv(yyyymmdd(start), yyyymmdd(today), ticker)
     if df is None or df.empty:
         start = today - timedelta(days=90)
         df = stock.get_market_ohlcv(yyyymmdd(start), yyyymmdd(today), ticker)
     if df is None or df.empty:
-        raise RuntimeError(f"{ticker} : 최근 거래 자료가 없습니다.")
+        raise RuntimeError(f"{ticker}: 최근 거래 자료 없음")
     return pd.to_datetime(df.index.max()).date()
 
 def normalize_date_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -109,48 +89,99 @@ def normalize_date_index(df: pd.DataFrame) -> pd.DataFrame:
     df["일자"] = pd.to_datetime(df["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
     return df
 
+def _normalize_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    """CSV/수집 데이터 모두 '일자'를 YYYY-MM-DD 문자열로 표준화."""
+    if df is None or df.empty or "일자" not in df.columns:
+        return df
+    df = df.copy()
+    df["일자"] = pd.to_datetime(df["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return df
+
+def _to_float_clean(s):
+    """문자 형태 수치를 안전하게 float로 변환: 쉼표/공백/% 제거"""
+    try:
+        if pd.isna(s):
+            return 0.0
+        x = str(s).strip()
+        if x.endswith("%"):
+            x = x[:-1]
+        x = x.replace(",", "").replace(" ", "")
+        return float(x)
+    except Exception:
+        return 0.0
+
+def _pick_first_col(cols, candidates):
+    """cols에서 candidates(우선순위 리스트) 중 처음으로 매칭되는 컬럼명 반환"""
+    for key in candidates:
+        for c in cols:
+            if key in c:
+                return c
+    return None
+
 def rename_investor_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "일자" not in df.columns:
         return empty_with_cols(["일자","기관 합계","기타법인","개인","외국인 합계","전체"])
     mapping = {
-        "기관합계": "기관 합계",
-        "외국인합계": "외국인 합계",
-        "전체": "전체", "개인": "개인", "기타법인": "기타법인",
-        "기관 합계": "기관 합계", "외국인 합계": "외국인 합계",
+        "기관합계":"기관 합계", "외국인합계":"외국인 합계",
+        "기관 합계":"기관 합계", "외국인 합계":"외국인 합계",
+        "개인":"개인", "기타법인":"기타법인", "전체":"전체"
     }
     df = df.rename(columns={c: mapping.get(c, c) for c in df.columns})
     for need in ["기관 합계","기타법인","개인","외국인 합계","전체"]:
         if need not in df.columns:
             df[need] = 0
-    keep = ["일자","기관 합계","기타법인","개인","외국인 합계","전체"]
-    return df[keep]
+    return df[["일자","기관 합계","기타법인","개인","외국인 합계","전체"]]
 
 def rename_short_cols(df: pd.DataFrame, is_balance=False) -> pd.DataFrame:
     """
-    공매도/공매도잔고 관련 컬럼을 표준화합니다.
-    [수정] '비중' 키워드를 추가하여 PyKRX에서 '비중'으로만 들어오는 데이터를 놓치지 않도록 함.
+    공매도 관련 표준화.
+    - is_balance=False: 거래(볼륨) → ['공매도','공매도비중']
+    - is_balance=True : 잔고     → ['공매도잔고','공매도잔고비중']
+    ※ 퍼센트/쉼표 등 문자열 전처리 포함
     """
     if df is None or df.empty or "일자" not in df.columns:
-        return empty_with_cols(["일자"] + (["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]))
-    
+        base = ["공매도잔고","공매도잔고비중"] if is_balance else ["공매도","공매도비중"]
+        return empty_with_cols(["일자"] + base)
+
     dfc = df.copy()
+
     if is_balance:
-        # 잔고 관련 컬럼 찾기
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고","잔고","BAL_QTY"])), None)
-        # 잔고비중 관련 컬럼 찾기 (여기에 '비중' 추가가 핵심)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도잔고비중","잔고비중","BAL_RTO", "비중"])), None)
-        
-        dfc["공매도잔고"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도잔고비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
-        return dfc[["일자","공매도잔고","공매도잔고비중"]]
+        # pykrx 잔고 계열에서 흔한 컬럼들: '공매도잔고수량/금액', '잔고수량/금액', '공매도잔고비중'('잔고비중')
+        amt_col = _pick_first_col(
+            dfc.columns,
+            ["공매도잔고", "잔고수량", "잔고금액", "잔고", "BAL_QTY", "BAL_AMT"]
+        )
+        rto_col = _pick_first_col(
+            dfc.columns,
+            ["공매도잔고비중", "잔고비중", "BAL_RTO", "비중"]  # '비중'이 여러 개일 수 있어도 우선순위상 뒤로 둠
+        )
+
+        dfc["공매도잔고"] = dfc[amt_col].apply(_to_float_clean) if amt_col else 0.0
+        dfc["공매도잔고비중"] = dfc[rto_col].apply(_to_float_clean) if rto_col else 0.0
+
+        keep = ["일자","공매도잔고","공매도잔고비중"]
+        out = dfc[keep].copy()
+
     else:
-        # 거래량 관련 컬럼
-        amt = next((c for c in dfc.columns if any(k in c for k in ["공매도","공매도거래량","거래량"])), None)
-        rto = next((c for c in dfc.columns if any(k in c for k in ["공매도비중","비중"])), None)
-        
-        dfc["공매도"] = pd.to_numeric(dfc[amt], errors="coerce") if amt else 0
-        dfc["공매도비중"] = pd.to_numeric(dfc[rto], errors="coerce") if rto else 0.0
-        return dfc[["일자","공매도","공매도비중"]]
+        # 거래(볼륨) 계열: '공매도거래량/대금', '공매도비중'
+        amt_col = _pick_first_col(
+            dfc.columns,
+            ["공매도거래량", "공매도", "거래량", "SV_QTY", "SV_AMT"]
+        )
+        rto_col = _pick_first_col(
+            dfc.columns,
+            ["공매도비중", "비중", "SV_RTO"]
+        )
+
+        dfc["공매도"] = dfc[amt_col].apply(_to_float_clean) if amt_col else 0.0
+        dfc["공매도비중"] = dfc[rto_col].apply(_to_float_clean) if rto_col else 0.0
+
+        keep = ["일자","공매도","공매도비중"]
+        out = dfc[keep].copy()
+
+    # 날짜 표준화
+    out["일자"] = pd.to_datetime(out["일자"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return out
 
 def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQ_COLS:
@@ -158,77 +189,145 @@ def ensure_all_cols(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = 0
     return df[REQ_COLS]
 
-def fetch_block(ticker: str, start_d: datetime.date, end_d: datetime.date) -> pd.DataFrame:
+# ---------- CSV 파일명 규칙: <이름>_<6자리티커>_stock_data.csv ----------
+def csv_path_for(eng_name: str, ticker: str) -> Path:
+    return DATA_DIR / f"{eng_name}_{str(ticker).zfill(6)}{OUTPUT_SUFFIX}"
+
+def fetch_block(ticker: str, start_d, end_d) -> pd.DataFrame:
     s, e = yyyymmdd(start_d), yyyymmdd(end_d)
-    ohlcv = stock.get_market_ohlcv(s, e, ticker); df1 = normalize_date_index(ohlcv)
-    inv   = stock.get_market_trading_volume_by_date(s, e, ticker); df2 = rename_investor_cols(normalize_date_index(inv))
-    
-    try: sv = stock.get_shorting_volume_by_date(s, e, ticker)
-    except Exception: sv = pd.DataFrame()
+    ohlcv = stock.get_market_ohlcv(s, e, ticker)
+    df1 = normalize_date_index(ohlcv)
+
+    inv = stock.get_market_trading_volume_by_date(s, e, ticker)
+    df2 = rename_investor_cols(normalize_date_index(inv))
+
+    try:
+        sv = stock.get_shorting_volume_by_date(s, e, ticker)
+    except Exception:
+        sv = pd.DataFrame()
     df3 = rename_short_cols(normalize_date_index(sv), is_balance=False)
-    
-    try: sb = stock.get_shorting_balance_by_date(s, e, ticker)
-    except Exception: sb = pd.DataFrame()
+
+    try:
+        sb = stock.get_shorting_balance_by_date(s, e, ticker)
+    except Exception:
+        sb = pd.DataFrame()
     df4 = rename_short_cols(normalize_date_index(sb), is_balance=True)
 
-    df = df1.merge(df2, on="일자", how="left").merge(df3, on="일자", how="left").merge(df4, on="일자", how="left")
+    df = df1.merge(df2, on="일자", how="left") \
+            .merge(df3, on="일자", how="left") \
+            .merge(df4, on="일자", how="left")
+
+    # 숫자 변환(퍼센트/쉼표 정규화는 각 rename_*에서 처리 완료)
     df = ensure_all_cols(df)
-    
-    # 수치형 변환 보장
     for c in [c for c in df.columns if c != "일자"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-        
-    df = df.sort_values("일자", ascending=not SORT_DESC)
+
+    return df.sort_values("일자", ascending=False)
+
+# =========================
+# (유지) T·T-1의 공매도잔고/비중을 T-2 값으로 덮어쓰기
+# =========================
+def propagate_short_balance_from_t2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    최신 내림차순 정렬 기준으로,
+    - 2행(2거래일 전)의 '공매도잔고/공매도잔고비중' 값을 읽어,
+    - 0행(현거래일), 1행(전일)의 두 컬럼을 동일 값으로 덮어쓴다.
+    - 2거래일 전 데이터가 없으면(행<3) 변경하지 않음.
+    """
+    cols = ["공매도잔고", "공매도잔고비중"]
+    if df is None or df.empty or not all(c in df.columns for c in cols):
+        return df
+    df = df.copy()
+    try:
+        df["__dt__"] = pd.to_datetime(df["일자"], errors="coerce")
+        df.sort_values("__dt__", ascending=False, inplace=True)
+        df.drop(columns="__dt__", inplace=True)
+    except Exception:
+        df.sort_values("일자", ascending=False, inplace=True)
+
+    if len(df) >= 3:
+        ref = df.iloc[2][cols].values
+        for idx in [0, 1]:
+            df.iloc[idx, df.columns.get_indexer(cols)] = ref
     return df
 
+# =========================
+# 회사별 업데이트
+# =========================
 def upsert_company(eng_name: str, ticker: str, run_on_holiday: bool):
     out_path = csv_path_for(eng_name, ticker)
     today = kst_today_date()
     end_date = last_trading_day_by_ohlcv(ticker, today)
 
+    # ---- 백필 윈도우 적용: 최근 N일 + last_have - 2일까지 후퇴 ----
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
-        # [수정] CSV 로드 시 컬럼 공백 제거 (안전장치)
-        base.columns = [str(c).strip() for c in base.columns]
-        
-        if base.empty:
-            last_have = None
-        else:
-            base["일자"] = pd.to_datetime(base["일자"], errors="coerce").dt.date
-            last_have = base["일자"].max()
-        start_date = (last_have + timedelta(days=1)) if last_have else (end_date - timedelta(days=WINDOW_DAYS_INIT))
+        base = _normalize_date_col(base)
+        last_have = None if base.empty else pd.to_datetime(base["일자"], errors="coerce").dt.date.max()
+
+        start_date_base = (last_have + timedelta(days=1)) if last_have else (end_date - timedelta(days=WINDOW_DAYS_INIT))
+        backfill_floor = end_date - timedelta(days=BACKFILL_CAL_DAYS_FOR_SHORT)
+        if last_have:
+            conservative_floor = last_have - timedelta(days=2)
+            backfill_floor = min(backfill_floor, conservative_floor)
+
+        start_date = min(start_date_base, backfill_floor)
     else:
         start_date = end_date - timedelta(days=WINDOW_DAYS_INIT)
 
     if (end_date < today) and (not run_on_holiday) and (not out_path.exists()):
-        logging.info("[%s] 휴장일(run_on_holiday=False) → 신규 생성 건 스킵", eng_name)
+        logging.info("[%s] 휴장일(run_on_holiday=False) → 신규 생성 스킵", eng_name)
         return False
+
     if start_date > end_date:
-        logging.info("[%s] 최신 상태 (추가할 데이터 없음).", eng_name); return False
+        logging.info("[%s] 최신 상태 (추가 데이터 없음)", eng_name)
+        return False
 
-    logging.info("[%s] 수집 구간: %s ~ %s (티커 %s)", eng_name, start_date, end_date, ticker)
+    logging.info("[%s] 재수집 구간: %s ~ %s (티커 %s)", eng_name, start_date, end_date, ticker)
     df = fetch_block(ticker, start_date, end_date)
+    df = _normalize_date_col(df)
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         base = pd.read_csv(out_path, encoding=ENCODING)
-        base.columns = [str(c).strip() for c in base.columns] # 안전장치
-        
+        base = _normalize_date_col(base)
+
+        # 병합: base(우선순위 낮음) + df(우선순위 높음)
+        base["__pri__"] = 0
+        df["__pri__"] = 1
         merged = pd.concat([base, df], ignore_index=True)
-        merged.drop_duplicates(subset=["일자"], keep="last", inplace=True)
-        merged = merged.sort_values("일자", ascending=not SORT_DESC)
+
+        # 최신→과거, 같은 일자는 __pri__가 높은(df) 값이 먼저 오도록
+        merged["__dt__"] = pd.to_datetime(merged["일자"], errors="coerce")
+        merged.sort_values(["__dt__", "__pri__"], ascending=[False, False], inplace=True, kind="mergesort")
+
+        # 동일 '일자' 중복 제거: 첫 행(=가장 최신 & df 우선)이 남게
+        merged.drop_duplicates(subset=["일자"], keep="first", inplace=True)
+        merged.drop(columns=["__dt__", "__pri__"], inplace=True)
+        merged.reset_index(drop=True, inplace=True)
+
+        # T·T-1 ← T-2 값 덮어쓰기
+        merged = propagate_short_balance_from_t2(merged)
+
+        # 최종 정렬 및 저장
+        merged["__dt__"] = pd.to_datetime(merged["일자"], errors="coerce")
+        merged.sort_values("__dt__", ascending=False, inplace=True)
+        merged.drop(columns="__dt__", inplace=True)
         merged.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
-        logging.info("[%s] 업데이트 완료 → %s", eng_name, out_path)
+        logging.info("[%s] 업데이트 → %s (총 %d행)", eng_name, out_path, len(merged))
     else:
-        df = df.sort_values("일자", ascending=not SORT_DESC)
+        df = propagate_short_balance_from_t2(df)
         df.to_csv(out_path, index=False, encoding=ENCODING, lineterminator="\n")
-        logging.info("[%s] 신규 생성 완료 → %s", eng_name, out_path)
+        logging.info("[%s] 신규 생성 → %s (총 %d행)", eng_name, out_path, len(df))
     return True
 
 # =========================
-# 산출물 (JSON + index.html)
+# 기업별 JSON + index.html 생성
+#  - 단일 index.json 생성 없음
 # =========================
 def emit_per_ticker_json(companies, rows_limit=None):
-    API_DIR.mkdir(parents=True, exist_ok=True)
+    api_dir = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "docs" / "api"
+    api_dir.mkdir(parents=True, exist_ok=True)
     cnt = 0
     for name, ticker in companies:
         csv_path = csv_path_for(name, ticker)
@@ -240,32 +339,29 @@ def emit_per_ticker_json(companies, rows_limit=None):
             df = pd.read_csv(csv_path)
         if df.empty:
             continue
+        if rows_limit:
+            df = df.head(int(rows_limit))
 
-        # [수정] 컬럼 공백 제거 (매핑 오류 방지)
-        df.columns = [str(c).strip() for c in df.columns]
-
-        df_use = df.head(int(rows_limit)) if rows_limit else df
-        payload = {
+        item = {
             "name": name,
             "ticker": str(ticker).zfill(6),
-            "columns": list(df_use.columns),
-            "rows": df_use.astype(object).where(pd.notna(df_use), "").values.tolist(),
-            "generated_at": kst_now().strftime("%Y-%m-%d %H:%M:%S %Z")
+            "columns": [str(c) for c in df.columns],
+            "rows": df.astype(str).values.tolist(),
+            "row_count": int(len(df)),
         }
-        (API_DIR / f"{name}_{str(ticker).zfill(6)}.json").write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
+        out = api_dir / f"{name}_{str(ticker).zfill(6)}.json"
+        out.write_text(json.dumps(item, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         cnt += 1
-    logging.info("per-ticker JSON 생성 완료: %d files → %s", cnt, API_DIR)
+    logging.info("기업별 JSON 생성: %d개", cnt)
 
 def emit_index_html(companies, rows_limit=None):
     import html as _html
-    from string import Template
-
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    from string import Template  # ← f-string 중괄호 이스케이프 문제 방지를 위해 Template 사용
+    docs_dir = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
 
     sections = []
-    generated = kst_now().strftime("%Y-%m-%d %H:%M:%S %Z")
+    generated = datetime.now(tz=KST).strftime("%Y-%m-%d %H:%M:%S %Z")
 
     for name, ticker in companies:
         csv_path = csv_path_for(name, ticker)
@@ -277,15 +373,11 @@ def emit_index_html(companies, rows_limit=None):
             df = pd.read_csv(csv_path)
         if df.empty:
             continue
-        
-        # [수정] 컬럼 공백 제거 (매핑 오류 방지)
-        df.columns = [str(c).strip() for c in df.columns]
-        
         if rows_limit:
             df = df.head(int(rows_limit))
 
         columns = [str(c) for c in df.columns]
-        rows = df.astype(object).where(pd.notna(df), "").astype(str).values.tolist()
+        rows = df.astype(str).values.tolist()
 
         thead = "".join(f"<th>{_html.escape(c)}</th>" for c in columns)
         tbody = "\n".join(
@@ -293,31 +385,35 @@ def emit_index_html(companies, rows_limit=None):
         )
         sec_id = f"{name}_{str(ticker).zfill(6)}"
 
+        # 🔹 차트용 섹션별 inline JSON (CORS 회피, 기존 구조/주석 유지)
         payload = {
             "name": name,
             "ticker": str(ticker).zfill(6),
-            "columns": columns,
-            "rows": rows,
+            "columns": [str(c).strip() for c in columns],  # 안전: 컬럼명 trim
+            "rows": rows,  # 문자열 그대로(표와 동일 소스)
         }
         json_raw = json.dumps(payload, ensure_ascii=False)
         json_safe = json_raw.replace("</", "<\\/")  # </script> 차단
 
+        # 🔹 표 + 차트 2개(세로 스택) + 섹션별 데이터 스크립트
         sections.append(f"""
 <section id="{_html.escape(sec_id)}">
   <h2>{_html.escape(name)} ({str(ticker).zfill(6)})</h2>
-  <div class="grid">
-    <div class="scroll">
-      <table>
-        <thead><tr>{thead}</tr></thead>
-        <tbody>{tbody}</tbody>
-      </table>
-      <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
-    </div>
-    <div class="charts">
-      <div id="chart-price-{_html.escape(sec_id)}" class="chart"></div>
-      <div id="chart-flow-{_html.escape(sec_id)}" class="chart"></div>
-    </div>
+  <div class="scroll">
+    <table>
+      <thead><tr>{thead}</tr></thead>
+      <tbody>
+      {tbody}
+      </tbody>
+    </table>
   </div>
+  <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
+
+  <div class="charts">
+    <div id="chart-price-{_html.escape(sec_id)}" class="chart"></div>
+    <div id="chart-flow-{_html.escape(sec_id)}" class="chart"></div>
+  </div>
+
   <script id="data-{_html.escape(sec_id)}" type="application/json">{json_safe}</script>
 </section>""")
 
@@ -329,7 +425,7 @@ def emit_index_html(companies, rows_limit=None):
 
     nav = "".join(f'<a href="#{_id_from(s)}">{_id_from(s)}</a>' for s in sections)
 
-    # [수정] 개선된 CSS 및 Plotly 설정 적용
+    # 🔹 2개 차트(가격/지표, 수급/공매도)를 그리는 스크립트 포함
     html_template = Template("""<!doctype html>
 <html lang="ko">
 <head>
@@ -341,32 +437,21 @@ def emit_index_html(companies, rows_limit=None):
 <title>KRX 기업별 데이터 테이블</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", Roboto, Arial, sans-serif; margin: 24px; background-color: #f9fafb; }
-  header { margin-bottom: 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 16px; }
-  h1 { margin: 0 0 8px 0; font-size: 24px; color: #111827; }
-  .meta-top { color:#6b7280; font-size:14px; }
-  .nav { display:flex; flex-wrap:wrap; gap:8px 12px; margin-top:12px; }
-  .nav a { font-size:14px; text-decoration:none; color:#2563eb; background: #eff6ff; padding: 4px 8px; border-radius: 4px; }
-  .nav a:hover { background: #dbeafe; }
-  
-  section { margin: 40px 0; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-  h2 { font-size: 20px; margin: 0 0 16px 0; border-left: 4px solid #2563eb; padding-left: 12px; color: #1f2937; }
-  
-  .grid { display: flex; flex-direction: column; gap: 20px; }
-  
-  /* 표 스타일 개선 */
-  .scroll { overflow:auto; max-height: 400px; border:1px solid #e5e7eb; border-radius: 6px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
-  th, td { border-bottom: 1px solid #e5e7eb; padding: 8px 12px; text-align: right; }
-  th { position: sticky; top:0; background:#f3f4f6; color: #374151; font-weight: 600; border-bottom: 2px solid #e5e7eb; }
-  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: inherit; border-right: 1px solid #e5e7eb; }
-  tr:hover td { background-color: #f9fafb; }
-  
-  .meta { color:#9ca3af; font-size:12px; margin-top: 8px; text-align: right; }
-  
-  /* 차트 레이아웃 개선 */
-  .charts { width: 100%; display: flex; flex-direction: column; gap: 24px; }
-  .chart { width: 100%; height: 500px; border:1px solid #e5e7eb; border-radius: 6px; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+  header { margin-bottom: 20px; }
+  .meta-top { color:#666; font-size:14px; }
+  .nav { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }
+  .nav a { font-size:13px; text-decoration:none; color:#2563eb; }
+  section { margin: 32px 0; }
+  h2 { font-size: 18px; margin: 12px 0; }
+  .scroll { overflow:auto; max-height: 60vh; border:1px solid #e5e7eb; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; white-space: nowrap; }
+  thead th { position: sticky; top:0; background:#fafafa; }
+  .meta { color:#666; font-size:12px; }
+  .charts { width: 100%; display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  .chart { width: 100%; height: 560px; border:1px solid #e5e7eb; }
 </style>
 </head>
 <body>
@@ -379,7 +464,7 @@ def emit_index_html(companies, rows_limit=None):
 $sections
 
 <script>
-/* ===== 유틸 ===== */
+// ===== 유틸 =====
 function SMA(arr,n){const o=Array(arr.length).fill(null);let s=0,q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);s+=v;if(q.length>n)s-=q.shift();if(q.length===n)o[i]=s/n}return o}
 function EMA(arr,n){const o=Array(arr.length).fill(null);const k=2/(n+1);let p=null;for(let i=0;i<arr.length;i++){const v=+arr[i]||0;p=(p==null)?v:v*k+p*(1-k);o[i]=p}return o}
 function STD(arr,n){const o=Array(arr.length).fill(null);let q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);if(q.length>n)q.shift();if(q.length===n){const m=q.reduce((a,b)=>a+b,0)/n;const s2=q.reduce((a,b)=>a+(b-m)*(b-m),0)/n;o[i]=Math.sqrt(s2)}}return o}
@@ -389,8 +474,8 @@ function bbBands(close,n=20,k=2){const ma=SMA(close,n),sd=STD(close,n),u=ma.map(
 function nnum(x){if(x==null)return 0;return +String(x).replace(/,/g,'').replace(/\\s+/g,'').replace(/%/g,'')||0}
 const str = (x)=> (x==null ? '' : String(x));
 const cumsum = (arr)=>{let s=0; return arr.map(v=>{s += (+v||0); return s;});};
+const safeMax = (arr)=> Math.max( ...(arr.map(v=>+v||0).filter(v=>isFinite(v)&&!isNaN(v))), 0 );
 
-/* 오름차순 정렬 보장 */
 function toAsc(date, ...series){
   const N = date.length;
   if (N < 2) return [date, ...series];
@@ -413,14 +498,13 @@ function showError(secId,msg){
   }
 }
 
-/* ===== 렌더링 ===== */
+// ===== 렌더링 =====
 function renderOne(secId){
   const tag=document.getElementById('data-'+secId);
   if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
   let j=null; try{ j=JSON.parse(tag.textContent); }catch(e){ showError(secId,'섹션 데이터 파싱 실패: '+e); return; }
 
-  // 컬럼 공백 제거 안전장치
-  const cols = (j.columns || []).map(c => String(c).trim());
+  const cols=(j.columns||[]).map(c=>String(c).trim());
 
   const iDate=idxOf(cols,'일자',['\\ufeff일자','DATE','date']),
         iOpen=idxOf(cols,'시가',['Open','open']),
@@ -431,10 +515,7 @@ function renderOne(secId){
         iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
         iInst=idxOf(cols,'기관 합계',['기관합계']),
         iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
-        iShortBR=idxOf(cols,'공매도잔고비중',[
-          '공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)',
-          '잔고비중','잔고 비중','공매도잔고비율','잔고비율'
-        ]);
+        iShortBR=idxOf(cols,'공매도잔고비중',['공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)','잔고비중','잔고 비중','공매도잔고비율','잔고비율']);
 
   if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락'); return; }
   const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
@@ -450,17 +531,15 @@ function renderOne(secId){
   let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
   let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
 
-  // 차트 그리기를 위해 날짜 오름차순 정렬
   [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
     toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
 
-  // 지표 계산
   const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
   const bb=bbBands(close,20,2);
   const rsi=RSI(close,14);
   const {macd,signal,hist}=MACD(close,12,26,9);
 
-  // -------- 차트 1: 주가/보조지표 --------
+  // 차트 1: 가격/지표
   const layout1={
     grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
     xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
@@ -478,41 +557,38 @@ function renderOne(secId){
   const traces1=[
     {type:'candlestick',x:date,open,high,low,close,name:'주가',
      increasing:{line:{color:'#ef4444'}}, decreasing:{line:{color:'#3b82f6'}} },
-    {type:'scatter',mode:'lines',x:date,y:ma20,name:'MA20', line:{color:'#f59e0b', width:1.5}},
-    {type:'scatter',mode:'lines',x:date,y:ma60,name:'MA60', line:{color:'#10b981', width:1.5}},
-    {type:'scatter',mode:'lines',x:date,y:ma120,name:'MA120', line:{color:'#6366f1', width:1.5}},
-    {type:'scatter',mode:'lines',x:date,y:bb.upper,name:'BB상단', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
-    {type:'scatter',mode:'lines',x:date,y:bb.lower,name:'BB하단', visible:'legendonly', line:{dash:'dot', color:'#9ca3af', width:1}},
-    {type:'scatter',mode:'lines',x:date,y:rsi,name:'RSI(14)',xaxis:'x2',yaxis:'y2', line:{color:'#8b5cf6'}},
-    {type:'bar',x:date,y:hist,name:'MACD Hist',xaxis:'x3',yaxis:'y3', marker:{color:'#d1d5db'}},
-    {type:'scatter',mode:'lines',x:date,y:macd,name:'MACD',xaxis:'x3',yaxis:'y3', line:{color:'#ef4444', width:1}},
-    {type:'scatter',mode:'lines',x:date,y:signal,name:'Signal',xaxis:'x3',yaxis:'y3', line:{color:'#3b82f6', width:1}},
-  ];
-
-  layout1.shapes = [
-    {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:70, y1:70, line:{color:'red', width:1, dash:'dot'}},
-    {type:'line', xref:'x2', yref:'y2', x0:date[0], x1:date[date.length-1], y0:30, y1:30, line:{color:'blue', width:1, dash:'dot'}}
+    {type:'scatter',mode:'lines',x:date,y:ma20,name:'MA20', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma60,name:'MA60', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma120,name:'MA120', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:bb.upper,name:'BB상단', visible:'legendonly', line:{dash:'dot', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:bb.lower,name:'BB하단', visible:'legendonly', line:{dash:'dot', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:rsi,name:'RSI(14)',xaxis:'x2',yaxis:'y2'},
+    {type:'bar',x:date,y:hist,name:'MACD Hist',xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',mode:'lines',x:date,y:macd,name:'MACD',xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',mode:'lines',x:date,y:signal,name:'Signal',xaxis:'x3',yaxis:'y3'},
   ];
 
   Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
 
-  // -------- 차트 2: 수급/공매도 --------
+  // 차트 2: 수급/공매도
   const layout2={
-    barmode:'group',
-    yaxis:{title:'순매수 수량', tickformat:',', showgrid:true},
-    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right', showgrid:false,
-            range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
+    yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
+    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
+           range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
     margin:{t:40,l:60,r:50,b:30},
     hovermode:'x unified',
     legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
     plot_bgcolor:'#ffffff'
   };
 
+  const instCum = cumsum(inst);
+  const foreignCum = cumsum(foreign);
+
   const traces2=[
-    {type:'bar',x:date,y:inst,name:'기관 순매수', marker:{color:'#fbbf24', opacity:0.6}},
-    {type:'bar',x:date,y:foreign,name:'외국인 순매수', marker:{color:'#10b981', opacity:0.6}},
-    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot', color:'#ef4444', width:1}},
-    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2', line:{color:'#6366f1', width:2}},
+    {type:'scatter',mode:'lines',x:date,y:instCum,   name:'기관 누적'},
+    {type:'scatter',mode:'lines',x:date,y:foreignCum,name:'외국인 누적'},
+    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot'}},
+    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2'},
   ];
 
   Plotly.newPlot('chart-flow-'+secId, traces2, layout2, {responsive:true, displaylogo:false});
@@ -524,8 +600,8 @@ function renderOne(secId){
 })();
 </script>
 
-<footer style="margin-top:60px; padding: 20px 0; border-top: 1px solid #e5e7eb; color:#6b7280; font-size:13px; text-align: center;">
-  Published via GitHub Pages · Inline JSON rendering (CORS-free)
+<footer style="margin-top:40px;color:#666;font-size:12px">
+  Published via GitHub Pages · Per-ticker JSON: /api/*.json
 </footer>
 </body>
 </html>""")
@@ -533,32 +609,27 @@ function renderOne(secId){
     html_doc = html_template.substitute(
         generated=generated,
         nav=nav,
-        sections="".join(sections),
+        sections="".join(sections) if sections else "<p>표시할 데이터가 없습니다.</p>",
     )
 
-    (DOCS_DIR / "index.html").write_text(html_doc, encoding="utf-8")
-    logging.info("index.html 생성 완료 → %s", DOCS_DIR / "index.html")
+    (docs_dir / "index.html").write_text(html_doc, encoding="utf-8")
+    logging.info("index.html 생성 완료 → %s", docs_dir / "index.html")
 
 # =========================
 # 엔트리포인트
 # =========================
 def main():
-    parser = argparse.ArgumentParser(description="KRX 수집 & CSV 업데이트 & 웹문서 생성")
+    parser = argparse.ArgumentParser(description="KRX 일별 데이터 수집 & CSV 업데이트")
     parser.add_argument("--company-list", default=str(DATA_DIR / "company_list.txt"))
-    parser.add_argument("--run-on-holiday", default="true",
-                        help="휴장일에도 실행(전 영업일 데이터 사용) (true/false)")
-    parser.add_argument("--rows-limit", default=None,
-                        help="index.html/JSON에 포함할 최대 행 수(최신 상위). 기본: 전체")
+    parser.add_argument("--run-on-holiday", default="true", help="휴장일에도 실행 (true/false)")
+    parser.add_argument("--rows-limit", default=os.getenv("ROWS_LIMIT", "").strip(),
+                        help="HTML/JSON 포함 최대 행 수 (빈 값이면 전량)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
     run_on_holiday = str(args.run_on_holiday).lower() in ("1","true","yes","y")
-    rows_limit = int(args.rows_limit) if args.rows_limit else None
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    API_DIR.mkdir(parents=True, exist_ok=True)
+    rows_limit = None if args.rows_limit in ("", "0", "none", "None") else int(args.rows_limit)
 
     try:
         companies = read_company_list(Path(args.company_list))
@@ -579,13 +650,14 @@ def main():
         except Exception as e:
             logging.exception("[%s,%s] 처리 중 오류: %s", name, ticker, e)
 
-    emit_per_ticker_json(companies, rows_limit=rows_limit)
-    emit_index_html(companies, rows_limit=rows_limit)
-
     if changed:
-        logging.info("변경사항이 있습니다. Git 커밋 단계에서 반영됩니다.")
+        logging.info("변경사항 존재 → 커밋 단계에서 반영됩니다.")
     else:
         logging.info("변경사항 없음.")
+
+    # 단일 index.json은 만들지 않음 → 기업별 JSON + index.html만 생성
+    emit_per_ticker_json(companies, rows_limit=rows_limit)
+    emit_index_html(companies, rows_limit=rows_limit)
 
 if __name__ == "__main__":
     main()
