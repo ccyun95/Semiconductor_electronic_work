@@ -6,3 +6,4 @@ Samsung_Electro-Mechanics,009150
 Isu_Petasys,007660
 ISC,095340
 TLB,356860
+Wonik_IPS,240810
